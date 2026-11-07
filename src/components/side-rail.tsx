@@ -37,8 +37,8 @@ export default function SideRail({
     <aside className="sticky top-0 z-40 hidden h-screen w-[76px] shrink-0 flex-col items-center justify-between border-r border-line bg-panel/60 py-5 backdrop-blur-xl lg:flex">
       {/* brand */}
       <a href="/" aria-label="Game Vault home" className="group">
-        <div className="grid h-11 w-11 place-items-center rounded-xl bg-volt text-void shadow-[0_0_30px_rgba(200,255,62,0.25)] transition-transform duration-300 group-hover:rotate-6">
-          <span className="font-display text-lg font-extrabold">V</span>
+        <div className="grid h-11 w-11 overflow-hidden rounded-xl bg-volt shadow-[0_0_30px_rgba(200,255,62,0.25)] transition-transform duration-300 group-hover:rotate-6">
+          <img src="/icon.png" alt="Sabab's Games Logo" className="h-full w-full object-cover" />
         </div>
       </a>
 

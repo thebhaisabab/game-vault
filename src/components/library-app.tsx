@@ -30,6 +30,30 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // ---------- admin verification ----------
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const secret = params.get("admin");
+      const expectedSecret = process.env.NEXT_PUBLIC_ADMIN_SECRET;
+
+      if (secret && expectedSecret && secret === expectedSecret) {
+        sessionStorage.setItem("gv_admin", "true");
+        setIsAdmin(true);
+      } else if (sessionStorage.getItem("gv_admin") === "true") {
+        setIsAdmin(true);
+      }
+    } catch {
+      /* private mode fallback */
+    }
+  }, []);
+
+  const adminQuery = useMemo(() => {
+    const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET;
+    return secret ? `?admin=${encodeURIComponent(secret)}` : "";
+  }, []);
 
   const gamesRef = useRef(games);
   gamesRef.current = games;
@@ -47,6 +71,18 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
   const dismissToast = useCallback((id: number) => {
     setToasts((ts) => ts.filter((x) => x.id !== id));
   }, []);
+
+  const handleAddIntent = useCallback(() => {
+    if (!isAdmin) {
+      pushToast({
+        title: "Viewing Mode",
+        detail: "Only Sabab can add games to this vault",
+        kind: "info",
+      });
+      return;
+    }
+    setModalOpen(true);
+  }, [isAdmin, pushToast]);
 
   // ---------- persisted view ----------
   useEffect(() => {
@@ -84,7 +120,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
       const el = e.target as HTMLElement | null;
       if (el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName)) return;
       if (modalOpen || selectedId !== null) return;
-      if (e.key === "a" || e.key === "A") setModalOpen(true);
+      if ((e.key === "a" || e.key === "A") && isAdmin) setModalOpen(true);
       if (e.key === "/") {
         e.preventDefault();
         document.querySelector<HTMLInputElement>("[data-lib-search]")?.focus();
@@ -95,15 +131,16 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [modalOpen, selectedId, changeView]);
+  }, [modalOpen, selectedId, changeView, isAdmin]);
 
   // ---------- data ops (optimistic, synced to Postgres) ----------
   const updateGame = useCallback(
     async (id: number, patch: GamePatch): Promise<boolean> => {
+      if (!isAdmin) return false;
       const prev = gamesRef.current.find((g) => g.id === id);
       setGames((gs) => gs.map((g) => (g.id === id ? ({ ...g, ...patch } as LibraryGame) : g)));
       try {
-        const res = await fetch(`/api/library/${id}`, {
+        const res = await fetch(`/api/library/${id}${adminQuery}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(patch),
@@ -122,18 +159,19 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
         return false;
       }
     },
-    [pushToast],
+    [isAdmin, adminQuery, pushToast],
   );
 
   const deleteGame = useCallback(
     async (id: number) => {
+      if (!isAdmin) return;
       const snapshot = gamesRef.current.find((g) => g.id === id);
       if (!snapshot) return;
       setGames((gs) => gs.filter((g) => g.id !== id));
       setSelectedId((s) => (s === id ? null : s));
 
       try {
-        const res = await fetch(`/api/library/${id}`, { method: "DELETE" });
+        const res = await fetch(`/api/library/${id}${adminQuery}`, { method: "DELETE" });
         if (!res.ok) throw new Error(String(res.status));
         pushToast({
           title: `Removed “${snapshot.title}”`,
@@ -145,7 +183,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
                 try {
                   const { id: _omit, ...payload } = snapshot;
                   void _omit;
-                  const res2 = await fetch("/api/library", {
+                  const res2 = await fetch(`/api/library${adminQuery}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
@@ -166,13 +204,17 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
         pushToast({ title: "Couldn't remove the game", kind: "err" });
       }
     },
-    [pushToast],
+    [isAdmin, adminQuery, pushToast],
   );
 
   const addToLibrary = useCallback(
     async (payload: Record<string, unknown>, label: string): Promise<AddOutcome> => {
+      if (!isAdmin) {
+        pushToast({ title: "Admin access required", detail: "Only Sabab can add games", kind: "err" });
+        return "error";
+      }
       try {
-        const res = await fetch("/api/library", {
+        const res = await fetch(`/api/library${adminQuery}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -191,7 +233,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
         return "error";
       }
     },
-    [pushToast],
+    [isAdmin, adminQuery, pushToast],
   );
 
   const addFromSearch = useCallback(
@@ -312,7 +354,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
         <SideRail
           filter={railFilter}
           onFilter={onRailFilter}
-          onAdd={() => setModalOpen(true)}
+          onAdd={handleAddIntent}
           count={games.length}
           playingCount={statusCounts.playing ?? 0}
           favoritesCount={favoritesCount}
@@ -351,8 +393,8 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
               games={filtered}
               isFiltered={isFiltered}
               onOpen={(g) => setSelectedId(g.id)}
-              onToggleFavorite={(g) => void updateGame(g.id, { favorite: !g.favorite })}
-              onAdd={() => setModalOpen(true)}
+              onToggleFavorite={isAdmin ? (g) => void updateGame(g.id, { favorite: !g.favorite }) : undefined}
+              onAdd={isAdmin ? handleAddIntent : undefined}
             />
           </main>
 
@@ -361,17 +403,25 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
               Game Vault — {formatGames(games.length)} · synced across every device
             </p>
             <p className="font-mono text-[10px] tracking-[0.2em] text-white/30 uppercase">
-              Press <span className="text-volt">A</span> to add ·{" "}
-              <span className="text-volt">1·2·3</span> to switch views
+              {isAdmin ? (
+                <>
+                  Press <span className="text-volt">A</span> to add ·{" "}
+                  <span className="text-volt">1·2·3</span> to switch views
+                </>
+              ) : (
+                <>
+                  <span className="text-volt">1·2·3</span> to switch views
+                </>
+              )}
             </p>
           </footer>
         </div>
       </div>
 
       {/* mobile FAB */}
-      {!modalOpen && (
+      {!modalOpen && isAdmin && (
         <button
-          onClick={() => setModalOpen(true)}
+          onClick={handleAddIntent}
           aria-label="Add a game"
           className="fixed right-5 bottom-5 z-30 grid h-14 w-14 place-items-center rounded-full bg-volt text-void shadow-[0_16px_40px_-8px_rgba(200,255,62,0.45)] transition-transform hover:scale-105 active:scale-95 lg:hidden"
         >
@@ -380,7 +430,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
       )}
 
       <AnimatePresence>
-        {modalOpen && (
+        {modalOpen && isAdmin && (
           <SearchModal
             key="search-modal"
             onClose={() => setModalOpen(false)}

@@ -393,7 +393,9 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
               games={filtered}
               isFiltered={isFiltered}
               onOpen={(g) => setSelectedId(g.id)}
-              onToggleFavorite={isAdmin ? (g) => void updateGame(g.id, { favorite: !g.favorite }) : undefined}
+              onToggleFavorite={(g) => {
+                if (isAdmin) void updateGame(g.id, { favorite: !g.favorite });
+              }}
               onAdd={isAdmin ? handleAddIntent : undefined}
             />
           </main>

@@ -11,9 +11,9 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "GAME VAULT — your library, everywhere",
+  title: "Sabab Plays",
   description:
-    "A personal game library that syncs across every device. Track what you're playing on PS5, PS4, Xbox, Switch and PC.",
+    "Personal Game Collection & Library Tracker.",
 };
 
 export const viewport: Viewport = {

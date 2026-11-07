@@ -133,7 +133,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
     return () => window.removeEventListener("keydown", handler);
   }, [modalOpen, selectedId, changeView, isAdmin]);
 
-  // ---------- data ops (optimistic, synced to Postgres) ----------
+  // ---------- data ops ----------
   const updateGame = useCallback(
     async (id: number, patch: GamePatch): Promise<boolean> => {
       if (!isAdmin) return false;
@@ -396,7 +396,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
               onToggleFavorite={(g) => {
                 if (isAdmin) void updateGame(g.id, { favorite: !g.favorite });
               }}
-              onAdd={isAdmin ? handleAddIntent : undefined}
+              onAdd={handleAddIntent}
             />
           </main>
 

@@ -3,6 +3,7 @@ import { libraryGames } from "@/db/schema";
 import { STATUS_ORDER } from "@/lib/constants";
 import type { GameStatus } from "@/lib/types";
 import { desc, eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,15 +12,18 @@ export async function GET() {
     .select()
     .from(libraryGames)
     .orderBy(desc(libraryGames.addedAt));
-  return Response.json({ games: rows });
+  return NextResponse.json({ games: rows });
 }
 
-function cleanString(
-  value: unknown,
-  max: number,
-): string | null {
-  if (typeof value !== "string") return null;
-  const v = value.trim().slice(0, max);
+function cleanString(value: unknown, max: number): string | null {
+  if (typeof value !== "string") {
+    if (typeof value === "number" || typeof value === "boolean") {
+      value = String(value);
+    } else {
+      return null;
+    }
+  }
+  const v = (value as string).trim().slice(0, max);
   return v.length ? v : null;
 }
 
@@ -34,8 +38,8 @@ function cleanInt(value: unknown, min: number, max: number): number | null {
 function cleanStringArray(value: unknown, maxItems: number): string[] {
   if (!Array.isArray(value)) return [];
   return value
-    .filter((v): v is string => typeof v === "string")
-    .map((v) => v.trim().slice(0, 60))
+    .filter((v): v is string => typeof v === "string" || typeof v === "number")
+    .map((v) => String(v).trim().slice(0, 60))
     .filter(Boolean)
     .slice(0, maxItems);
 }
@@ -47,16 +51,25 @@ function cleanStatus(value: unknown): GameStatus {
 }
 
 export async function POST(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const adminSecret = searchParams.get("admin");
+  const expectedSecret =
+    process.env.ADMIN_SECRET || process.env.NEXT_PUBLIC_ADMIN_SECRET;
+
+  if (!adminSecret || adminSecret !== expectedSecret) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
-    return Response.json({ error: "invalid_json" }, { status: 400 });
+    return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
   const title = cleanString(body.title, 200);
   if (!title) {
-    return Response.json({ error: "title_required" }, { status: 400 });
+    return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
 
   const externalId = cleanString(body.externalId, 80);
@@ -69,7 +82,7 @@ export async function POST(req: Request) {
       .where(eq(libraryGames.externalId, externalId))
       .limit(1);
     if (existing) {
-      return Response.json({ game: existing, conflict: true });
+      return NextResponse.json({ game: existing, conflict: true });
     }
   }
 
@@ -95,6 +108,11 @@ export async function POST(req: Request) {
     favorite: body.favorite === true,
   };
 
-  const [row] = await db.insert(libraryGames).values(values).returning();
-  return Response.json({ game: row, conflict: false }, { status: 201 });
+  try {
+    const [row] = await db.insert(libraryGames).values(values).returning();
+    return NextResponse.json({ game: row, conflict: false }, { status: 201 });
+  } catch (err) {
+    console.error("Database insert error:", err);
+    return NextResponse.json({ error: "database_error", details: String(err) }, { status: 500 });
+  }
 }

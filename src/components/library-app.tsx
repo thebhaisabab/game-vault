@@ -25,7 +25,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortId>("added_desc");
+  const [sort, setSort] = useState<SortId>("title_asc");
   const [view, setView] = useState<LibraryView>("grid");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);

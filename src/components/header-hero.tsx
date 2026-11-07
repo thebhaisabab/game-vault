@@ -65,7 +65,7 @@ export default function HeaderHero({ games }: { games: LibraryGame[] }) {
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
             className="font-display text-[clamp(2.6rem,7.5vw,5.5rem)] leading-[0.95] font-extrabold tracking-tight"
           >
-            <span className="text-outline block">YOUR</span>
+            <span className="text-outline block">SABAB'S</span>
             <span className="block">
               GAME<span className="text-volt">VAULT</span>
               <span className="text-violet">.</span>

@@ -2,7 +2,7 @@ import { db } from "@/db";
 import { libraryGames } from "@/db/schema";
 import { STATUS_ORDER } from "@/lib/constants";
 import type { GameStatus } from "@/lib/types";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, asc } from "drizzle-orm"; // 1. Import asc
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ export async function GET() {
   const rows = await db
     .select()
     .from(libraryGames)
-    .orderBy(desc(libraryGames.addedAt));
+    .orderBy(asc(libraryGames.title)); // 2. Change default order to Title A-Z
   return NextResponse.json({ games: rows });
 }
 

@@ -396,7 +396,7 @@ export default function LibraryApp({ initialGames }: { initialGames: LibraryGame
               onToggleFavorite={(g) => {
                 if (isAdmin) void updateGame(g.id, { favorite: !g.favorite });
               }}
-              onAdd={isAdmin ? handleAddIntent : undefined}
+              onAdd={handleAddIntent}
             />
           </main>
 

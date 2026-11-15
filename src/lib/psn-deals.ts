@@ -92,6 +92,102 @@ const fetchInit = (force: boolean | undefined) =>
     ? ({ cache: "no-store" } as const)
     : ({ next: { revalidate: REVALIDATE_SECONDS } } as const);
 
+// ---------------------------------- Public unblocked edge/CORS relays ----
+// Vercel/AWS datacenter IPs are blanket-blocked by Akamai (store.playstation.com)
+// and by psdeals.net/psprices.com. When a direct request is served 403/blocked
+// (or the HTML is an edgesuite error page), the SAME target is re-fetched
+// through public relays that aren't blocked: allorigins.win → codetabs.com.
+const RELAY_ENDPOINTS: ReadonlyArray<{
+  name: string;
+  build: (target: string) => string;
+}> = [
+  {
+    name: "allorigins.win",
+    build: (t) => `https://api.allorigins.win/raw?url=${encodeURIComponent(t)}`,
+  },
+  {
+    name: "codetabs.com",
+    build: (t) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(t)}`,
+  },
+];
+
+const BLOCK_MARKERS = [
+  "access denied",
+  "edgesuite",
+  "you don't have permission",
+  "errors.edgesuite.net",
+  "request blocked",
+  "captcha",
+];
+
+const looksBlocked = (html: string | null | undefined): boolean => {
+  if (!html || html.length < 400) return true;
+  const head = html.slice(0, 8000).toLowerCase();
+  return BLOCK_MARKERS.some((m) => head.includes(m));
+};
+
+export interface RelayedHtml {
+  html: string;
+  /** Human/audit label, e.g. "store.playstation.com" or "psdeals.net via allorigins.win". */
+  via: string;
+}
+
+/**
+ * Fetch an HTML document: direct with full Chrome headers first, then the
+ * public relays in order. Returns null when every path is blocked. The
+ * `via` label is surfaced to the UI so relay usage is never hidden.
+ */
+async function fetchHtmlWithRelays(
+  target: string,
+  { force, acceptLanguage }: { force?: boolean; acceptLanguage: string },
+): Promise<RelayedHtml | null> {
+  try {
+    const res = await fetch(target, {
+      headers: desktopHeaders(acceptLanguage),
+      signal: AbortSignal.timeout(12000),
+      ...fetchInit(force),
+    });
+    if (res.ok) {
+      const html = await res.text();
+      if (!looksBlocked(html)) return { html, via: new URL(target).hostname };
+      console.warn(
+        `[psn-deals] ${target} returned blocked-looking HTML (${html.length}b) — trying relays`,
+      );
+    } else {
+      console.warn(`[psn-deals] ${target} → HTTP ${res.status} — trying relays`);
+    }
+  } catch (err) {
+    console.warn(`[psn-deals] ${target} fetch failed — trying relays:`, err);
+  }
+  for (const relay of RELAY_ENDPOINTS) {
+    try {
+      const res = await fetch(relay.build(target), {
+        headers: {
+          "User-Agent": CHROME_UA,
+          Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        },
+        signal: AbortSignal.timeout(20000),
+        ...fetchInit(force),
+      });
+      if (!res.ok) {
+        console.warn(`[psn-deals] relay ${relay.name} → HTTP ${res.status} for ${target}`);
+        continue;
+      }
+      const html = await res.text();
+      if (looksBlocked(html)) {
+        console.warn(
+          `[psn-deals] relay ${relay.name} returned blocked-looking HTML (${html.length}b)`,
+        );
+        continue;
+      }
+      return { html, via: `${new URL(target).hostname} via ${relay.name}` };
+    } catch (err) {
+      console.warn(`[psn-deals] relay ${relay.name} failed for ${target}:`, err);
+    }
+  }
+  return null;
+}
+
 // Module-level bookkeeping (per server instance): timestamps + provider
 // labels of the last successful LIVE fetches, exposed in the API payload so
 // the UI can show "LIVE SOURCE: <provider>" and the exact fetch time.
@@ -564,9 +660,6 @@ const psnCategoryUrl = (categoryId: string) =>
 const PSN_SEARCH_URL = (q: string) =>
   `https://store.playstation.com/en-tr/search/${encodeURIComponent(q)}`;
 
-/** Deals-hub requests per spec: en-TR locale on the English TR storefront. */
-const PSN_TR_HEADERS = () => desktopHeaders("en-TR,en;q=0.9,tr;q=0.8");
-
 const AGGREGATORS = [
   {
     id: "psdeals.net",
@@ -591,37 +684,45 @@ export interface TurkeyDealsResult {
   asOf: null;
 }
 
-/** Strategy 1: PlayStation Store HTML pages with full Chrome desktop headers. */
+/**
+ * Strategy 1: PlayStation Store HTML pages (deals hub + category grid),
+ * fetched direct with Chrome headers, then through public relays when the
+ * datacenter IP is blocked. Returns the games plus a `via` provider label.
+ */
 async function fetchTurkeyDealsPsnPages(
   { force, categoryId }: FetchOpts = {},
-): Promise<PsnDealGame[] | null> {
+): Promise<{ games: PsnDealGame[]; provider: string } | null> {
   const category = sanitizeCategoryId(categoryId);
   const pages = [PSN_DEALS_PAGE, psnCategoryUrl(category)];
   const results = await Promise.allSettled(
     pages.map(async (url) => {
-      const res = await fetch(url, {
-        headers: PSN_TR_HEADERS(),
-        signal: AbortSignal.timeout(12000),
-        ...fetchInit(force),
+      const got = await fetchHtmlWithRelays(url, {
+        force,
+        acceptLanguage: "en-TR,en;q=0.9,tr;q=0.8",
       });
-      if (!res.ok) {
-        throw new Error(`${url} → HTTP ${res.status} (possible Akamai/IP block)`);
-      }
-      const html = await res.text();
-      const nextData = parseNextData(html);
+      if (!got) throw new Error(`${url} unreachable (direct + relays)`);
+      const nextData = parseNextData(got.html);
       if (!nextData) throw new Error(`${url} had no parseable __NEXT_DATA__`);
-      return walkerDeals(nextData, true, 60);
+      return { deals: walkerDeals(nextData, true, 60), via: got.via };
     }),
   );
   const merged: PsnDealGame[] = [];
+  const vias: string[] = [];
   for (const r of results) {
-    if (r.status === "fulfilled") merged.push(...r.value);
-    else console.warn("[psn-deals] PSN deal page failed:", r.reason);
+    if (r.status === "fulfilled") {
+      merged.push(...r.value.deals);
+      vias.push(r.value.via);
+    } else {
+      console.warn("[psn-deals] PSN deal page failed:", r.reason);
+    }
   }
   const games = dedupeByTitle(merged, 60).sort(
     (a, b) => b.discountPct - a.discountPct,
   );
-  return games.length >= 4 ? games : null;
+  if (games.length < 4) return null;
+  const provider =
+    vias.find((v) => v.includes(" via ")) ?? vias[0] ?? "store.playstation.com";
+  return { games, provider };
 }
 
 // --------------------------------------- Deal-campaign (pill) extraction --
@@ -629,18 +730,44 @@ async function fetchTurkeyDealsPsnPages(
 const CAMPAIGN_SOUNDLIKE_SKIP = /[₺$€£¥]|\d{3,}/;
 
 /**
+ * Only REAL PlayStation Store deal-category links count as campaigns. Sony's
+ * global chrome (Browse / Subscriptions / Global Web Store /
+ * @sie-ppr-web-store/app …) also carries UUIDs — those are excluded by both
+ * requiring the category-URL shape and blocklisting chrome titles.
+ */
+const CATEGORY_URL_RE =
+  /\/(?:en-tr|tr-tr)\/category\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f-])/gi;
+
+const CHROME_TITLE_RE =
+  /(browse|subscriptions?|global web store|@sie-ppr|web-store\/app|sign\s*in|log\s*in|all subscriptions|ps store front|view all deals$)/i;
+
+const safeDecode = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+
+/** Collect category UUIDs only from strings shaped like store category URLs. */
+const collectCategoryUuids = (raw: string, out: Set<string>) => {
+  for (const variant of [raw, safeDecode(raw)]) {
+    for (const m of variant.matchAll(CATEGORY_URL_RE)) {
+      out.add(m[1].toLowerCase());
+    }
+  }
+};
+
+/**
  * Walk the deals-hub page and collect the campaign/collection banners it
  * advertises (e.g. "All Deals", "Black Friday", "Games for Less"). A campaign
- * is an OBJECT that references a category UUID and carries a human title, but
- * is NOT itself a priced product (games embed the same UUID in their own
- * payloads — those are excluded).
+ * is an OBJECT that links to a /category/<uuid> URL and carries a human
+ * title, but is NOT itself a priced product.
  */
 const extractCampaigns = (payload: unknown): DealCampaign[] => {
   const found = new Map<string, DealCampaign>();
   const stack: unknown[] = [payload];
   let steps = 0;
-  const uuidRe =
-    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
   while (stack.length > 0 && steps < 150_000) {
     steps += 1;
     const node = stack.pop();
@@ -662,15 +789,16 @@ const extractCampaigns = (payload: unknown): DealCampaign[] => {
     const uuids = new Set<string>();
     for (const v of Object.values(rec)) {
       if (typeof v !== "string") continue;
-      for (const m of v.matchAll(uuidRe)) uuids.add(m[0].toLowerCase());
+      collectCategoryUuids(v, uuids);
     }
     if (uuids.size > 0 && rawTitle && !looksLikePricedProduct(rec)) {
       const title = decodeEntities(rawTitle).replace(/\s+/g, " ").trim();
       if (
         title.length >= 3 &&
-        title.length <= 60 &&
+        title.length <= 48 &&
         /[a-z]/i.test(title) &&
-        !CAMPAIGN_SOUNDLIKE_SKIP.test(title)
+        !CAMPAIGN_SOUNDLIKE_SKIP.test(title) &&
+        !CHROME_TITLE_RE.test(title)
       ) {
         const banner = pickBannerImage(rec);
         for (const id of uuids) {
@@ -708,13 +836,12 @@ export async function getDealCampaigns(
     imageUrl: null,
   };
   try {
-    const res = await fetch(PSN_DEALS_PAGE, {
-      headers: PSN_TR_HEADERS(),
-      signal: AbortSignal.timeout(12000),
-      ...fetchInit(force),
+    const got = await fetchHtmlWithRelays(PSN_DEALS_PAGE, {
+      force,
+      acceptLanguage: "en-TR,en;q=0.9,tr;q=0.8",
     });
-    if (!res.ok) throw new Error(`${PSN_DEALS_PAGE} → HTTP ${res.status}`);
-    const nextData = parseNextData(await res.text());
+    if (!got) throw new Error(`${PSN_DEALS_PAGE} unreachable (direct + relays)`);
+    const nextData = parseNextData(got.html);
     if (!nextData) throw new Error("deals page had no parseable __NEXT_DATA__");
     const campaigns = extractCampaigns(nextData);
     campaignsCache = { value: campaigns, expiresAt: Date.now() + REVALIDATE_SECONDS * 1000 };
@@ -732,17 +859,15 @@ async function fetchTurkeyDealsAggregators(
 ): Promise<{ games: PsnDealGame[]; provider: string } | null> {
   for (const source of AGGREGATORS) {
     try {
-      const res = await fetch(source.url, {
-        headers: PSN_TR_HEADERS(),
-        signal: AbortSignal.timeout(12000),
-        ...fetchInit(force),
+      const got = await fetchHtmlWithRelays(source.url, {
+        force,
+        acceptLanguage: "en-TR,en;q=0.9,tr;q=0.8",
       });
-      if (!res.ok) throw new Error(`${source.id} → HTTP ${res.status}`);
-      const html = await res.text();
-      const games = aggregatorDeals(html, source.origin, {
+      if (!got) throw new Error(`${source.id} unreachable (direct + relays)`);
+      const games = aggregatorDeals(got.html, source.origin, {
         requireDiscount: true,
       });
-      if (games.length >= 4) return { games, provider: source.id };
+      if (games.length >= 4) return { games, provider: got.via };
       console.warn(`[psn-deals] ${source.id} parsed only ${games.length} cards`);
     } catch (err) {
       console.warn(`[psn-deals] aggregator ${source.id} failed:`, err);
@@ -756,11 +881,11 @@ export async function getTurkeyDeals(
 ): Promise<TurkeyDealsResult> {
   // 1) PlayStation Store pages (en-tr deals hub + selected category grid)
   try {
-    const games = await fetchTurkeyDealsPsnPages(opts);
-    if (games) {
+    const psn = await fetchTurkeyDealsPsnPages(opts);
+    if (psn) {
       lastLive.gamesAt = Date.now();
-      lastLive.gamesProvider = "store.playstation.com";
-      return { games, source: "live", provider: "store.playstation.com", asOf: null };
+      lastLive.gamesProvider = psn.provider;
+      return { games: psn.games, source: "live", provider: psn.provider, asOf: null };
     }
   } catch (err) {
     console.error("[psn-deals] PlayStation Store deals fetch failed:", err);
@@ -798,15 +923,14 @@ export async function searchPsnTrLive(
   const needle = normTitle(q);
   if (q.length < 2) return { results: [], provider: null };
 
-  // 1) PlayStation Store search page
+  // 1) PlayStation Store search page (direct → relays)
   try {
-    const res = await fetch(PSN_SEARCH_URL(q), {
-      headers: PSN_TR_HEADERS(),
-      signal: AbortSignal.timeout(12000),
-      ...fetchInit(opts.force),
+    const got = await fetchHtmlWithRelays(PSN_SEARCH_URL(q), {
+      force: opts.force,
+      acceptLanguage: "en-TR,en;q=0.9,tr;q=0.8",
     });
-    if (!res.ok) throw new Error(`PSN TR search → HTTP ${res.status}`);
-    const nextData = parseNextData(await res.text());
+    if (!got) throw new Error("PSN TR search unreachable (direct + relays)");
+    const nextData = parseNextData(got.html);
     if (!nextData) throw new Error("PSN TR search page had no __NEXT_DATA__");
     const results = dedupeByTitle(
       walkerDeals(nextData, false, 25).filter((d) =>
@@ -814,25 +938,24 @@ export async function searchPsnTrLive(
       ),
       10,
     ).sort((a, b) => b.discountPct - a.discountPct);
-    return { results, provider: "store.playstation.com" };
+    return { results, provider: got.via };
   } catch (err) {
     console.warn("[psn-deals] PSN TR search failed, trying psdeals.net:", err);
   }
 
-  // 2) psdeals.net search fallback
-  const res = await fetch(PSDEALS_SEARCH_URL(q), {
-    headers: PSN_TR_HEADERS(),
-    signal: AbortSignal.timeout(12000),
-    ...fetchInit(opts.force),
+  // 2) psdeals.net search fallback (direct → relays)
+  const got = await fetchHtmlWithRelays(PSDEALS_SEARCH_URL(q), {
+    force: opts.force,
+    acceptLanguage: "en-TR,en;q=0.9,tr;q=0.8",
   });
-  if (!res.ok) throw new Error(`psdeals.net search → HTTP ${res.status}`);
-  const html = await res.text();
+  if (!got) throw new Error("psdeals.net search unreachable (direct + relays)");
+  const html = got.html;
   const results = aggregatorDeals(html, "https://psdeals.net", {
     requireDiscount: false,
   })
     .filter((d) => normTitle(d.title).includes(needle))
     .sort((a, b) => b.discountPct - a.discountPct);
-  return { results: results.slice(0, 10), provider: "psdeals.net" };
+  return { results: results.slice(0, 10), provider: got.via };
 }
 
 // ------------------------------------------- Worldwide console live lookup --

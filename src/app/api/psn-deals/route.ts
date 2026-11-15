@@ -30,8 +30,38 @@ async function getDb() {
   return { db, psnWatchlist };
 }
 
+/**
+ * Zero-migration watchlist setup: make sure the psn_watchlist table exists
+ * before touching it. Vercel deploys don't run `drizzle-kit push`, so the
+ * table is created here, idempotently, once per server instance. On failure
+ * the flag resets and the next request retries — and the UI falls back to
+ * localStorage (watchlistOk:false).
+ */
+let watchlistTableReady: Promise<void> | null = null;
+
+function ensureWatchlistTable(): Promise<void> {
+  if (!watchlistTableReady) {
+    watchlistTableReady = (async () => {
+      const { db } = await getDb();
+      await db.execute(sql`
+        CREATE TABLE IF NOT EXISTS "psn_watchlist" (
+          "id" serial PRIMARY KEY,
+          "title" text NOT NULL UNIQUE,
+          "created_at" timestamp NOT NULL DEFAULT now()
+        )
+      `);
+    })();
+    // Reset on failure so the next request retries instead of caching a rejection.
+    watchlistTableReady.catch(() => {
+      watchlistTableReady = null;
+    });
+  }
+  return watchlistTableReady;
+}
+
 async function readWatchlist(): Promise<{ titles: string[]; ok: boolean }> {
   try {
+    await ensureWatchlistTable();
     const { db, psnWatchlist } = await getDb();
     const rows = await db
       .select({ title: psnWatchlist.title })
@@ -39,9 +69,10 @@ async function readWatchlist(): Promise<{ titles: string[]; ok: boolean }> {
       .orderBy(asc(psnWatchlist.title));
     return { titles: rows.map((r) => r.title), ok: true };
   } catch (err) {
-    // Table missing (migration not run) or DB unreachable — degrade gracefully.
+    // DB unreachable / DATABASE_URL missing — degrade gracefully; the UI
+    // falls back to a browser-local watchlist.
     console.error(
-      "[psn-deals] Watchlist read failed. Run `npx drizzle-kit push` to create psn_watchlist.",
+      "[psn-deals] Watchlist read failed (DATABASE_URL missing or DB unreachable):",
       err,
     );
     return { titles: [], ok: false };
@@ -146,6 +177,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
   try {
+    await ensureWatchlistTable();
     const { db, psnWatchlist } = await getDb();
     await db
       .insert(psnWatchlist)
@@ -153,7 +185,7 @@ export async function POST(req: Request) {
       .onConflictDoNothing({ target: psnWatchlist.title });
   } catch (err) {
     console.error(
-      "[psn-deals] Watchlist insert failed. Run `npx drizzle-kit push` to create psn_watchlist.",
+      "[psn-deals] Watchlist insert failed (DATABASE_URL missing or DB unreachable):",
       err,
     );
     return NextResponse.json(
@@ -181,6 +213,7 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
   try {
+    await ensureWatchlistTable();
     const { db, psnWatchlist } = await getDb();
     await db
       .delete(psnWatchlist)

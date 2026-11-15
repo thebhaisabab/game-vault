@@ -1,12 +1,14 @@
 import { asc, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { TURKEY_SNAPSHOT_AS_OF, CONSOLES_AS_OF } from "@/lib/psn-deals-data";
+import { CONSOLES_AS_OF, ALL_DEALS_CATEGORY } from "@/lib/psn-deals-data";
 
 import {
   getConsoleBoard,
   getFxRates,
   getTurkeyDeals,
+  getDealCampaigns,
   liveMeta,
+  sanitizeCategoryId,
   searchPsnTrLive,
   REVALIDATE_SECONDS,
 } from "@/lib/psn-deals";
@@ -70,6 +72,22 @@ export async function GET(req: Request) {
     }
   }
 
+  // ---- Live games for ONE campaign category (pill switching) -------------
+  const categoryParam = searchParams.get("category");
+  if (categoryParam) {
+    const categoryId = sanitizeCategoryId(categoryParam);
+    const deals = await getTurkeyDeals({ force, categoryId });
+    const meta = liveMeta();
+    return NextResponse.json({
+      games: deals.games,
+      source: deals.source,
+      provider: deals.provider,
+      category: categoryId,
+      fetchedAt: meta.lastLiveGamesAt,
+      cacheMaxAgeSeconds: REVALIDATE_SECONDS,
+    });
+  }
+
   // ---- Full payload -------------------------------------------------------
   const fx = await getFxRates({ force });
   const [turkey, board] = await Promise.all([
@@ -77,6 +95,7 @@ export async function GET(req: Request) {
     getConsoleBoard(fx, { force }),
   ]);
   const wl = await readWatchlist();
+  const campaigns = await getDealCampaigns({ force });
   const meta = liveMeta();
   const liveStamps = [meta.lastLiveGamesAt, meta.lastLiveConsolesAt, meta.lastLiveFxAt]
     .filter((v): v is string => v != null)
@@ -84,6 +103,8 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     games: turkey.games,
+    campaigns,
+    category: ALL_DEALS_CATEGORY.toLowerCase(),
     consoles: board.rows,
     consoleLiveShare:
       board.rows.length > 0 ? board.liveCount / board.rows.length : 0,
@@ -98,9 +119,7 @@ export async function GET(req: Request) {
       consolesProvider: board.provider,
       fxProvider: "open.er-api.com",
     },
-    gamesAsOf: turkey.asOf ?? null,
     consolesAsOf: CONSOLES_AS_OF,
-    snapshotAsOf: TURKEY_SNAPSHOT_AS_OF,
     gamesFetchedAt: meta.lastLiveGamesAt,
     consolesFetchedAt: meta.lastLiveConsolesAt,
     lastLiveFetch: liveStamps.length > 0 ? liveStamps[liveStamps.length - 1] : null,

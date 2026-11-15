@@ -40,11 +40,10 @@
  */
 
 import {
+  ALL_DEALS_CATEGORY,
   CONSOLE_DEALS,
   FX_FALLBACK,
-  TURKEY_SNAPSHOT_AS_OF,
-  TURKEY_SNAPSHOT_GAMES,
-  withDiscount,
+  type DealCampaign,
   type ConsoleCurrency,
   type ConsoleDeal,
   type EnrichedConsoleDeal,
@@ -78,7 +77,15 @@ const desktopHeaders = (acceptLanguage: string) => ({
 
 export interface FetchOpts {
   force?: boolean;
+  /** Category UUID to load instead of the default All Deals category. */
+  categoryId?: string;
 }
+
+const CATEGORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Sanitise a category UUID coming from the client; falls back to All Deals. */
+export const sanitizeCategoryId = (value: string | null | undefined): string =>
+  value && CATEGORY_ID_RE.test(value) ? value.toLowerCase() : ALL_DEALS_CATEGORY;
 
 const fetchInit = (force: boolean | undefined) =>
   force
@@ -285,6 +292,20 @@ function* walkJson(
   }
 }
 
+/** Banner image for a campaign object: explicit banner keys first, media arrays second. */
+const pickBannerImage = (rec: Record<string, unknown>): string | null => {
+  const banner = pickString(rec, [
+    "bannerImage",
+    "banner",
+    "coverImage",
+    "imageUrl",
+    "image",
+    "thumbnail",
+  ]);
+  if (banner && banner.startsWith("http")) return banner;
+  return pickImage(rec);
+};
+
 const djb2 = (s: string) => {
   let h = 5381;
   for (let i = 0; i < s.length; i++) {
@@ -318,6 +339,21 @@ const platformOf = (probe: string): Array<"PS5" | "PS4"> => {
   return ["PS5"];
 };
 
+/** PSN catalog product id, e.g. "UP0001-PPSA01234_00-ABCDEF1234567890". */
+const pickProductId = (rec: Record<string, unknown>): string | null => {
+  for (const key of ["id", "productId", "commerceProductId", "namespaceId"]) {
+    const v = rec[key];
+    if (
+      typeof v === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{9,63}$/.test(v) &&
+      /\d/.test(v)
+    ) {
+      return v;
+    }
+  }
+  return null;
+};
+
 const productToDeal = (
   rec: Record<string, unknown>,
   { requireDiscount }: { requireDiscount: boolean },
@@ -348,15 +384,18 @@ const productToDeal = (
   );
   if (requireDiscount && discountPct < 1) return null;
   const probe = JSON.stringify(rec).slice(0, 3000);
+  const productId = pickProductId(rec);
   return {
-    id: `psn-live-${djb2(title.toLowerCase())}`,
+    id: productId ?? `psn-live-${djb2(title.toLowerCase())}`,
     title,
     platforms: platformOf(probe),
     basePrice: base,
     salePrice: sale,
     discountPct,
     coverUrl: pickImage(rec),
-    url: `https://store.playstation.com/en-tr/search/${encodeURIComponent(title)}`,
+    url: productId
+      ? `https://store.playstation.com/en-tr/product/${encodeURIComponent(productId)}`
+      : `https://store.playstation.com/en-tr/search/${encodeURIComponent(title)}`,
   };
 };
 
@@ -518,23 +557,26 @@ const aggregatorDeals = (
 
 // -------------------------------------- PSN Turkey live game deal sources --
 
-const PSN_DEAL_PAGES = [
-  "https://store.playstation.com/en-tr/pages/deals",
-  "https://store.playstation.com/tr-tr/category/3f772501-f6f8-49b7-abac-874a88ca4897/1",
-] as const;
+const PSN_DEALS_PAGE = "https://store.playstation.com/en-tr/pages/deals";
+const psnCategoryUrl = (categoryId: string) =>
+  `https://store.playstation.com/en-tr/category/${categoryId}/1`;
+
 const PSN_SEARCH_URL = (q: string) =>
   `https://store.playstation.com/en-tr/search/${encodeURIComponent(q)}`;
 
+/** Deals-hub requests per spec: en-TR locale on the English TR storefront. */
+const PSN_TR_HEADERS = () => desktopHeaders("en-TR,en;q=0.9,tr;q=0.8");
+
 const AGGREGATORS = [
-  {
-    id: "psprices.com",
-    url: "https://psprices.com/region-tr/discounts/?platform=PS5,PS4",
-    origin: "https://psprices.com",
-  },
   {
     id: "psdeals.net",
     url: "https://psdeals.net/tr-store/discounts",
     origin: "https://psdeals.net",
+  },
+  {
+    id: "psprices.com",
+    url: "https://psprices.com/region-tr/discounts/?platform=PS5,PS4",
+    origin: "https://psprices.com",
   },
 ] as const;
 const PSDEALS_SEARCH_URL = (q: string) =>
@@ -542,20 +584,23 @@ const PSDEALS_SEARCH_URL = (q: string) =>
 
 export interface TurkeyDealsResult {
   games: PsnDealGame[];
-  source: "live" | "snapshot";
+  source: "live" | "unavailable";
   /** Provider hostname when source === "live" (e.g. "store.playstation.com"). */
   provider: string | null;
-  asOf: string | null;
+  /** Always null — no offline snapshot exists; kept for API compatibility. */
+  asOf: null;
 }
 
 /** Strategy 1: PlayStation Store HTML pages with full Chrome desktop headers. */
 async function fetchTurkeyDealsPsnPages(
-  { force }: FetchOpts = {},
+  { force, categoryId }: FetchOpts = {},
 ): Promise<PsnDealGame[] | null> {
+  const category = sanitizeCategoryId(categoryId);
+  const pages = [PSN_DEALS_PAGE, psnCategoryUrl(category)];
   const results = await Promise.allSettled(
-    PSN_DEAL_PAGES.map(async (url) => {
+    pages.map(async (url) => {
       const res = await fetch(url, {
-        headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+        headers: PSN_TR_HEADERS(),
         signal: AbortSignal.timeout(12000),
         ...fetchInit(force),
       });
@@ -579,6 +624,108 @@ async function fetchTurkeyDealsPsnPages(
   return games.length >= 4 ? games : null;
 }
 
+// --------------------------------------- Deal-campaign (pill) extraction --
+
+const CAMPAIGN_SOUNDLIKE_SKIP = /[₺$€£¥]|\d{3,}/;
+
+/**
+ * Walk the deals-hub page and collect the campaign/collection banners it
+ * advertises (e.g. "All Deals", "Black Friday", "Games for Less"). A campaign
+ * is an OBJECT that references a category UUID and carries a human title, but
+ * is NOT itself a priced product (games embed the same UUID in their own
+ * payloads — those are excluded).
+ */
+const extractCampaigns = (payload: unknown): DealCampaign[] => {
+  const found = new Map<string, DealCampaign>();
+  const stack: unknown[] = [payload];
+  let steps = 0;
+  const uuidRe =
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  while (stack.length > 0 && steps < 150_000) {
+    steps += 1;
+    const node = stack.pop();
+    if (node == null) continue;
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (typeof node !== "object") continue;
+    const rec = node as Record<string, unknown>;
+    const rawTitle = pickString(rec, [
+      "name",
+      "title",
+      "localName",
+      "label",
+      "headline",
+      "text",
+    ]);
+    const uuids = new Set<string>();
+    for (const v of Object.values(rec)) {
+      if (typeof v !== "string") continue;
+      for (const m of v.matchAll(uuidRe)) uuids.add(m[0].toLowerCase());
+    }
+    if (uuids.size > 0 && rawTitle && !looksLikePricedProduct(rec)) {
+      const title = decodeEntities(rawTitle).replace(/\s+/g, " ").trim();
+      if (
+        title.length >= 3 &&
+        title.length <= 60 &&
+        /[a-z]/i.test(title) &&
+        !CAMPAIGN_SOUNDLIKE_SKIP.test(title)
+      ) {
+        const banner = pickBannerImage(rec);
+        for (const id of uuids) {
+          if (!found.has(id)) found.set(id, { id, title, imageUrl: banner });
+        }
+      }
+    }
+    stack.push(...Object.values(rec));
+  }
+  // Pin "All Deals" first; the deals page order follows otherwise.
+  found.delete(ALL_DEALS_CATEGORY.toLowerCase());
+  const allDeals: DealCampaign = {
+    id: ALL_DEALS_CATEGORY.toLowerCase(),
+    title: "All Deals",
+    imageUrl: null,
+  };
+  return [allDeals, ...[...found.values()].slice(0, 11)];
+};
+
+let campaignsCache: { value: DealCampaign[]; expiresAt: number } | undefined;
+
+/**
+ * Active deal-campaign pills from the TR deals hub. Always includes
+ * "All Deals"; on any failure returns just that one pill.
+ */
+export async function getDealCampaigns(
+  { force }: FetchOpts = {},
+): Promise<DealCampaign[]> {
+  if (!force && campaignsCache && campaignsCache.expiresAt > Date.now()) {
+    return campaignsCache.value;
+  }
+  const allDeals: DealCampaign = {
+    id: ALL_DEALS_CATEGORY.toLowerCase(),
+    title: "All Deals",
+    imageUrl: null,
+  };
+  try {
+    const res = await fetch(PSN_DEALS_PAGE, {
+      headers: PSN_TR_HEADERS(),
+      signal: AbortSignal.timeout(12000),
+      ...fetchInit(force),
+    });
+    if (!res.ok) throw new Error(`${PSN_DEALS_PAGE} → HTTP ${res.status}`);
+    const nextData = parseNextData(await res.text());
+    if (!nextData) throw new Error("deals page had no parseable __NEXT_DATA__");
+    const campaigns = extractCampaigns(nextData);
+    campaignsCache = { value: campaigns, expiresAt: Date.now() + REVALIDATE_SECONDS * 1000 };
+    return campaigns;
+  } catch (err) {
+    console.warn("[psn-deals] deal-campaign extraction failed:", err);
+    if (!force) campaignsCache = { value: [allDeals], expiresAt: Date.now() + 5 * 60 * 1000 };
+    return [allDeals];
+  }
+}
+
 /** Strategy 2: live aggregators (psprices.com → psdeals.net). */
 async function fetchTurkeyDealsAggregators(
   { force }: FetchOpts = {},
@@ -586,7 +733,7 @@ async function fetchTurkeyDealsAggregators(
   for (const source of AGGREGATORS) {
     try {
       const res = await fetch(source.url, {
-        headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+        headers: PSN_TR_HEADERS(),
         signal: AbortSignal.timeout(12000),
         ...fetchInit(force),
       });
@@ -607,7 +754,7 @@ async function fetchTurkeyDealsAggregators(
 export async function getTurkeyDeals(
   opts: FetchOpts = {},
 ): Promise<TurkeyDealsResult> {
-  // 1) PlayStation Store pages
+  // 1) PlayStation Store pages (en-tr deals hub + selected category grid)
   try {
     const games = await fetchTurkeyDealsPsnPages(opts);
     if (games) {
@@ -618,7 +765,7 @@ export async function getTurkeyDeals(
   } catch (err) {
     console.error("[psn-deals] PlayStation Store deals fetch failed:", err);
   }
-  // 2) Live aggregators
+  // 2) Live aggregators (Akamai/IP-block fallback)
   try {
     const agg = await fetchTurkeyDealsAggregators(opts);
     if (agg) {
@@ -629,14 +776,9 @@ export async function getTurkeyDeals(
   } catch (err) {
     console.error("[psn-deals] aggregator deals fetch failed:", err);
   }
-  // 3) Labelled snapshot (only when EVERY live endpoint failed)
-  console.error("[psn-deals] All live PSN TR sources failed — serving labelled snapshot.");
-  return {
-    games: TURKEY_SNAPSHOT_GAMES.map(withDiscount),
-    source: "snapshot",
-    provider: null,
-    asOf: TURKEY_SNAPSHOT_AS_OF,
-  };
+  // 3) NO offline snapshot — report the outage honestly.
+  console.error("[psn-deals] All live PSN TR sources failed — deals unavailable.");
+  return { games: [], source: "unavailable", provider: null, asOf: null };
 }
 
 /**
@@ -659,7 +801,7 @@ export async function searchPsnTrLive(
   // 1) PlayStation Store search page
   try {
     const res = await fetch(PSN_SEARCH_URL(q), {
-      headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+      headers: PSN_TR_HEADERS(),
       signal: AbortSignal.timeout(12000),
       ...fetchInit(opts.force),
     });
@@ -679,7 +821,7 @@ export async function searchPsnTrLive(
 
   // 2) psdeals.net search fallback
   const res = await fetch(PSDEALS_SEARCH_URL(q), {
-    headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+    headers: PSN_TR_HEADERS(),
     signal: AbortSignal.timeout(12000),
     ...fetchInit(opts.force),
   });
@@ -791,6 +933,42 @@ const CURRENCY_REGEX: Record<ConsoleCurrency, RegExp> = {
   EUR: /(?:€\s*([\d]{2,4}(?:[.,]\d{2})?)|([\d]{2,4}(?:[.,]\d{2})?)\s*€)/g,
   JPY: /(?:¥\s*([\d]{1,3}(?:[.,][\d]{3})+|[\d]{4,7})|([\d]{1,3}(?:[.,][\d]{3})+|[\d]{4,7})\s*円)/g,
   TRY: /(?:₺\s*([\d]{1,3}(?:[.,][\d]{3})*(?:[.,]\d{1,2})?|[\d]{4,7})|([\d]{1,3}(?:[.,][\d]{3})*(?:[.,]\d{1,2})?|[\d]{4,7})\s*(?:₺|TL))/g,
+};
+
+/** OpenGraph product meta — only meaningful on single-product pages. */
+const metaContent = (html: string, key: string): string | null => {
+  const tagRe = new RegExp(
+    `<meta[^>]+(?:property|name|itemprop)="${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*>`,
+    "i",
+  );
+  const tag = html.match(tagRe)?.[0];
+  if (!tag) return null;
+  return tag.match(/content="([^"]*)"/i)?.[1]?.trim() ?? null;
+};
+
+const offersFromOpenGraph = (
+  html: string,
+  currency: ConsoleCurrency,
+): LiveOffer | null => {
+  const priceRaw =
+    metaContent(html, "product:price:amount") ??
+    metaContent(html, "og:price:amount") ??
+    metaContent(html, "product:sale_price:amount") ??
+    metaContent(html, "og:price:price");
+  const cur = (
+    metaContent(html, "product:price:currency") ??
+    metaContent(html, "og:price:currency") ??
+    metaContent(html, "product:sale_price:currency") ??
+    ""
+  ).toUpperCase();
+  const price = priceRaw ? toNumber(priceRaw) : null;
+  if (price == null || cur !== currency || !inBounds(price, currency)) return null;
+  const snapped =
+    currency === "JPY" || currency === "TRY"
+      ? Math.round(price)
+      : Math.round(price * 100) / 100;
+  const model = modelFromText(html.slice(0, 4000)) ?? "pro";
+  return { model, price: snapped, currency, availability: null, name: null };
 };
 
 /** Pass 1: JSON-LD Product nodes with offers. */
@@ -1016,11 +1194,12 @@ async function fetchRegionOffers(
         });
         if (res.ok) {
           const html = await res.text();
-          for (const offer of offersFromJsonLd(html, region.currency)) {
-            if (offer.model === "pro" && inBounds(offer.price, region.currency)) {
-              byModel.set("pro", offer);
-              return byModel;
-            }
+          const pro =
+            offersFromJsonLd(html, region.currency).find((o) => o.model === "pro") ??
+            offersFromOpenGraph(html, region.currency);
+          if (pro && pro.model === "pro") {
+            byModel.set("pro", pro);
+            return byModel;
           }
         }
       } catch (directErr) {

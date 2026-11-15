@@ -108,13 +108,11 @@ export default function SearchModal({
   };
 
   const providerLabel =
-    provider === "igdb"
-      ? "IGDB · the full game database"
-      : provider === "rawg"
-        ? "RAWG · the full game database"
-        : provider === "steam"
-          ? "Steam catalogue · add IGDB or RAWG keys for consoles"
-          : null;
+    provider === "wikipedia"
+      ? "Wikipedia + Steam · keyless search, every platform"
+      : provider === "steam"
+        ? "Steam Store · PC catalogue, no keys needed"
+        : null;
 
   return (
     <>

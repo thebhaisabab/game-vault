@@ -1,17 +1,28 @@
 import type { GameSearchResult, SearchResponse } from "./types";
 
 /**
- * Game search provider chain:
- *   1. IGDB  — best coverage of every console (set IGDB_CLIENT_ID / IGDB_CLIENT_SECRET,
- *              Twitch creds; TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET also accepted)
- *   2. RAWG  — great coverage (set RAWG_API_KEY, free at rawg.io/apidocs)
- *   3. Steam — keyless fallback (PC catalogue)
+ * Game search provider chain — fully keyless, zero environment variables:
+ *   1. Steam Store search — PC catalogue with app-id based CDN artwork, great
+ *      relevance for PC releases and multi-platform games also sold on Steam
+ *   2. Wikipedia + Wikidata — covers console exclusives and multi-platform
+ *      titles (search via the MediaWiki API, structured facts via the Wikidata
+ *      API: release year, platforms, developer, publisher)
+ *
+ * Both sources are queried in parallel; results are interleaved, de-duplicated
+ * by normalised title (metadata merged field-by-field), and capped at 25.
  */
 
 const PLATFORM_MAP: Record<string, string> = {
   "PC (Microsoft Windows)": "PC",
+  "Microsoft Windows": "PC",
+  Windows: "PC",
+  "Windows 10": "PC",
+  "Windows 11": "PC",
+  DOS: "DOS",
   "Xbox Series X|S": "Xbox Series X|S",
   "Xbox Series S/X": "Xbox Series X|S",
+  "Xbox Series X and Series S": "Xbox Series X|S",
+  "Xbox Series X": "Xbox Series X|S",
   "PlayStation 5": "PS5",
   "PlayStation 4": "PS4",
   "PlayStation 3": "PS3",
@@ -22,8 +33,9 @@ const PLATFORM_MAP: Record<string, string> = {
   "Nintendo Switch": "Switch",
   "Nintendo Switch 2": "Switch 2",
   "Wii U": "Wii U",
-  "Wii": "Wii",
+  Wii: "Wii",
   "Nintendo GameCube": "GameCube",
+  GameCube: "GameCube",
   "Nintendo 64": "N64",
   "Nintendo 3DS": "3DS",
   "Nintendo DS": "DS",
@@ -33,16 +45,26 @@ const PLATFORM_MAP: Record<string, string> = {
   "Super Nintendo Entertainment System": "SNES",
   "Nintendo Entertainment System": "NES",
   "Sega Mega Drive/Genesis": "Genesis",
+  "Sega Mega Drive": "Genesis",
+  "Mega Drive": "Genesis",
+  "Sega Saturn": "Saturn",
+  Saturn: "Saturn",
   "Web browser": "Web",
   "Xbox One": "Xbox One",
   "Xbox 360": "Xbox 360",
   Xbox: "Xbox",
   Mac: "Mac",
+  macOS: "Mac",
+  "Mac OS": "Mac",
+  "OS X": "Mac",
   Linux: "Linux",
   iOS: "iOS",
   Android: "Android",
   Arcade: "Arcade",
   Dreamcast: "Dreamcast",
+  "Sega Dreamcast": "Dreamcast",
+  Amiga: "Amiga",
+  "ZX Spectrum": "ZX Spectrum",
 };
 
 function shortPlatforms(names: Array<string | null | undefined>): string[] {
@@ -55,166 +77,16 @@ function shortPlatforms(names: Array<string | null | undefined>): string[] {
   return [...out];
 }
 
-// ---------------------------------------------------------------- IGDB ----
+const MAX_RESULTS = 25;
 
-interface IgdbGame {
-  id: number;
-  name: string;
-  cover?: { image_id?: string };
-  artworks?: Array<{ image_id?: string }>;
-  screenshots?: Array<{ image_id?: string }>;
-  platforms?: Array<{ name?: string }>;
-  first_release_date?: number;
-  summary?: string;
-  genres?: Array<{ name?: string }>;
-  involved_companies?: Array<{
-    developer?: boolean;
-    publisher?: boolean;
-    company?: { name?: string };
-  }>;
-  total_rating?: number;
-}
-
-let igdbToken: { value: string; expiresAt: number } | undefined;
-
-async function getIgdbToken(): Promise<string> {
-  const clientId = process.env.IGDB_CLIENT_ID ?? process.env.TWITCH_CLIENT_ID;
-  const clientSecret =
-    process.env.IGDB_CLIENT_SECRET ?? process.env.TWITCH_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error("IGDB not configured");
-
-  if (igdbToken && igdbToken.expiresAt > Date.now() + 60_000) {
-    return igdbToken.value;
-  }
-  const res = await fetch(
-    `https://id.twitch.tv/oauth2/token?client_id=${encodeURIComponent(
-      clientId,
-    )}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`,
-    { method: "POST", signal: AbortSignal.timeout(8000) },
-  );
-  if (!res.ok) throw new Error(`Twitch OAuth failed (${res.status})`);
-  const data = (await res.json()) as { access_token: string; expires_in: number };
-  igdbToken = {
-    value: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  };
-  return igdbToken.value;
-}
-
-const igdbImage = (id: string | undefined, size: string) =>
-  id ? `https://images.igdb.com/igdb/image/upload/t_${size}/${id}.jpg` : null;
-
-async function searchIgdb(query: string): Promise<GameSearchResult[]> {
-  const clientId = process.env.IGDB_CLIENT_ID ?? process.env.TWITCH_CLIENT_ID;
-  const token = await getIgdbToken();
-  const safe = query.replace(/["\\]/g, " ").slice(0, 120);
-
-  const body = [
-    `search "${safe}";`,
-    "fields name, cover.image_id, artworks.image_id, screenshots.image_id,",
-    "platforms.name, first_release_date, summary, genres.name,",
-    "involved_companies.company.name, involved_companies.developer,",
-    "involved_companies.publisher, total_rating;",
-    "limit 25;",
-  ].join(" ");
-
-  const res = await fetch("https://api.igdb.com/v4/games", {
-    method: "POST",
-    headers: {
-      "Client-ID": clientId!,
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "text/plain",
-      Accept: "application/json",
-    },
-    body,
-    signal: AbortSignal.timeout(9000),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`IGDB search failed (${res.status})`);
-  const games = (await res.json()) as IgdbGame[];
-
-  return games.map((g) => {
-    const dev = g.involved_companies?.find((c) => c.developer)?.company?.name;
-    const pub = g.involved_companies?.find((c) => c.publisher)?.company?.name;
-    const heroId = g.artworks?.[0]?.image_id ?? g.screenshots?.[0]?.image_id;
-    const ts = g.first_release_date;
-    return {
-      externalId: `igdb:${g.id}`,
-      source: "igdb",
-      title: g.name,
-      coverUrl: igdbImage(g.cover?.image_id, "cover_big_2x"),
-      heroUrl: igdbImage(heroId, "1080p"),
-      summary: g.summary ?? null,
-      developer: dev ?? null,
-      publisher: pub ?? null,
-      genres: (g.genres ?? []).map((x) => x.name).filter(Boolean) as string[],
-      platforms: shortPlatforms((g.platforms ?? []).map((p) => p.name)),
-      releaseYear: ts ? new Date(ts * 1000).getUTCFullYear() : null,
-      releaseDate: ts ? new Date(ts * 1000).toISOString().slice(0, 10) : null,
-      criticScore:
-        typeof g.total_rating === "number" ? Math.round(g.total_rating) : null,
-    } satisfies GameSearchResult;
-  });
-}
-
-// ---------------------------------------------------------------- RAWG ----
-
-interface RawgGame {
-  id: number;
-  name: string;
-  released?: string | null;
-  background_image?: string | null;
-  rating?: number;
-  ratings_count?: number;
-  genres?: Array<{ name?: string }>;
-  platforms?: Array<{ platform?: { name?: string } }>;
-  parent_platforms?: Array<{ platform?: { name?: string } }>;
-}
-
-async function searchRawg(query: string): Promise<GameSearchResult[]> {
-  const key = process.env.RAWG_API_KEY;
-  if (!key) throw new Error("RAWG not configured");
-  const url =
-    `https://api.rawg.io/api/games?key=${encodeURIComponent(key)}` +
-    `&search=${encodeURIComponent(query)}&page_size=25`;
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(9000),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`RAWG search failed (${res.status})`);
-  const data = (await res.json()) as { results?: RawgGame[] };
-
-  return (data.results ?? []).map((g) => {
-    const platformNames = (g.platforms ?? g.parent_platforms ?? []).map(
-      (p) => p.platform?.name,
-    );
-    const year = g.released ? Number(g.released.slice(0, 4)) : NaN;
-    const useRating = (g.ratings_count ?? 0) >= 20;
-    return {
-      externalId: `rawg:${g.id}`,
-      source: "rawg",
-      title: g.name,
-      coverUrl: g.background_image ?? null,
-      heroUrl: g.background_image ?? null,
-      summary: null,
-      developer: null,
-      publisher: null,
-      genres: (g.genres ?? []).map((x) => x.name).filter(Boolean) as string[],
-      platforms: shortPlatforms(platformNames),
-      releaseYear: Number.isFinite(year) ? year : null,
-      releaseDate: g.released ?? null,
-      criticScore:
-        useRating && typeof g.rating === "number" && g.rating > 0
-          ? Math.round(g.rating * 20)
-          : null,
-    } satisfies GameSearchResult;
-  });
-}
+const USER_AGENT =
+  "GameVault/1.0 (https://github.com/thebhaisabab/game-vault; game search)";
 
 // --------------------------------------------------------------- Steam ----
 
 interface SteamItem {
-  id: number;
+  type?: string;
+  id: number | string;
   name: string;
   metascore?: string;
   platforms?: { windows?: boolean; mac?: boolean; linux?: boolean };
@@ -226,6 +98,7 @@ async function searchSteam(query: string): Promise<GameSearchResult[]> {
       query,
     )}&l=english&cc=US`;
   const res = await fetch(url, {
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
     signal: AbortSignal.timeout(9000),
     cache: "no-store",
   });
@@ -233,28 +106,318 @@ async function searchSteam(query: string): Promise<GameSearchResult[]> {
   const data = (await res.json()) as { items?: SteamItem[] };
 
   return (data.items ?? [])
-    .slice(0, 25)
-    .map((g) => {
+    .filter((g) => !g.type || g.type === "app")
+    .flatMap((g): GameSearchResult[] => {
+      const appId = Number(g.id);
+      if (!Number.isFinite(appId) || !g.name) return [];
       const platforms = ["PC"];
       if (g.platforms?.mac) platforms.push("Mac");
       if (g.platforms?.linux) platforms.push("Linux");
       const meta = g.metascore ? Number.parseInt(g.metascore, 10) : NaN;
-      return {
-        externalId: `steam:${g.id}`,
-        source: "steam",
-        title: g.name,
-        coverUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${g.id}/library_600x900_2x.jpg`,
-        heroUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${g.id}/library_hero.jpg`,
-        summary: null,
-        developer: null,
-        publisher: null,
-        genres: [],
-        platforms,
-        releaseYear: null,
-        releaseDate: null,
-        criticScore: Number.isFinite(meta) && meta > 0 ? meta : null,
-      } satisfies GameSearchResult;
+      return [
+        {
+          externalId: `steam:${appId}`,
+          source: "steam",
+          title: g.name,
+          coverUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/library_600x900_2x.jpg`,
+          heroUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/library_hero.jpg`,
+          summary: null,
+          developer: null,
+          publisher: null,
+          genres: [],
+          platforms,
+          releaseYear: null,
+          releaseDate: null,
+          criticScore: Number.isFinite(meta) && meta > 0 ? meta : null,
+        } satisfies GameSearchResult,
+      ];
+    })
+    .slice(0, MAX_RESULTS);
+}
+
+// ----------------------------------------------------------- Wikipedia ----
+
+interface WikiPage {
+  pageid?: number;
+  title?: string;
+  description?: string;
+  extract?: string;
+  thumbnail?: { source?: string };
+  original?: { source?: string };
+  pageprops?: { wikibase_item?: string };
+}
+
+interface WikidataDetails {
+  year: number | null;
+  date: string | null;
+  platformIds: string[];
+  developerIds: string[];
+  publisherIds: string[];
+}
+
+/**
+ * Strip a trailing disambiguation qualifier from article titles, e.g.
+ * "Infamous (video game)" -> "Infamous". Leaves real titles untouched.
+ */
+function cleanWikipediaTitle(title: string): string {
+  return title.replace(/\s*\([^)]*\bgames?\b[^)]*\)\s*$/i, "").trim();
+}
+
+async function fetchWikipediaPages(query: string): Promise<WikiPage[]> {
+  const params = new URLSearchParams({
+    action: "query",
+    format: "json",
+    formatversion: "2",
+    generator: "search",
+    // Biasing the query toward video games keeps console exclusives ranked
+    // highly while still matching any title containing the search text.
+    gsrsearch: `${query} video game`,
+    gsrnamespace: "0",
+    gsrlimit: String(MAX_RESULTS),
+    prop: "pageprops|pageimages|description|extracts",
+    ppprop: "wikibase_item",
+    piprop: "thumbnail|original",
+    pithumbsize: "600",
+    pilimit: "50",
+    exintro: "1",
+    explaintext: "1",
+    exsentences: "2",
+    redirects: "1",
+  });
+  const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+    signal: AbortSignal.timeout(9000),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Wikipedia search failed (${res.status})`);
+  const data = (await res.json()) as { query?: { pages?: WikiPage[] } };
+  return data.query?.pages ?? [];
+}
+
+async function fetchWikidataDetails(
+  ids: string[],
+): Promise<Map<string, WikidataDetails>> {
+  const out = new Map<string, WikidataDetails>();
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i += 50) {
+    const chunk = unique.slice(i, i + 50);
+    const params = new URLSearchParams({
+      action: "wbgetentities",
+      ids: chunk.join("|"),
+      props: "claims",
+      format: "json",
     });
+    const res = await fetch(`https://www.wikidata.org/w/api.php?${params}`, {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+      signal: AbortSignal.timeout(9000),
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`Wikidata claims failed (${res.status})`);
+    const data = (await res.json()) as {
+      entities?: Record<
+        string,
+        { claims?: Record<string, Array<Record<string, unknown>>> }
+      >;
+    };
+
+    for (const [qid, entity] of Object.entries(data.entities ?? {})) {
+      const claims = entity.claims ?? {};
+      const timeOf = (pid: string): string | null => {
+        for (const claim of claims[pid] ?? []) {
+          const value = (claim as any)?.mainsnak?.datavalue?.value;
+          if (value && typeof value.time === "string") return value.time;
+        }
+        return null;
+      };
+      const entityIdsOf = (pid: string): string[] => {
+        const idsOut: string[] = [];
+        for (const claim of claims[pid] ?? []) {
+          const id = (claim as any)?.mainsnak?.datavalue?.value?.id;
+          if (typeof id === "string") idsOut.push(id);
+        }
+        return idsOut;
+      };
+
+      const time = timeOf("P577") ?? timeOf("P571"); // publication date, else inception
+      const m = time?.match(/^\+?(\d{4})-(\d{2})-(\d{2})/);
+      const year = m ? Number.parseInt(m[1], 10) : null;
+      const date =
+        m && m[2] !== "00" && m[3] !== "00"
+          ? `${m[1]}-${m[2]}-${m[3]}`
+          : null;
+
+      out.set(qid, {
+        year,
+        date,
+        platformIds: entityIdsOf("P400"), // platform
+        developerIds: entityIdsOf("P178"), // developer
+        publisherIds: entityIdsOf("P123"), // publisher
+      });
+    }
+  }
+  return out;
+}
+
+async function fetchWikidataLabels(
+  ids: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(ids)].slice(0, 50);
+  if (unique.length === 0) return out;
+  const params = new URLSearchParams({
+    action: "wbgetentities",
+    ids: unique.join("|"),
+    props: "labels",
+    languages: "en",
+    format: "json",
+  });
+  const res = await fetch(`https://www.wikidata.org/w/api.php?${params}`, {
+    headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+    signal: AbortSignal.timeout(9000),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Wikidata labels failed (${res.status})`);
+  const data = (await res.json()) as {
+    entities?: Record<string, { labels?: { en?: { value?: string } } }>;
+  };
+  for (const [qid, entity] of Object.entries(data.entities ?? {})) {
+    const label = entity.labels?.en?.value;
+    if (typeof label === "string") out.set(qid, label);
+  }
+  return out;
+}
+
+async function searchWikipedia(query: string): Promise<GameSearchResult[]> {
+  const rawPages = await fetchWikipediaPages(query);
+
+  // Prefer pages that clearly describe a game; if none match, keep the raw
+  // search results so unusual titles are still findable.
+  const gameish = rawPages.filter((p) =>
+    /game/i.test(`${p.title ?? ""} ${p.description ?? ""} ${p.extract ?? ""}`),
+  );
+  const pages = (gameish.length > 0 ? gameish : rawPages).slice(
+    0,
+    MAX_RESULTS,
+  );
+
+  const wdIds = pages
+    .map((p) => p.pageprops?.wikibase_item)
+    .filter((id): id is string => Boolean(id));
+
+  // Wikidata enrichment is best-effort: without it we still return titles,
+  // descriptions and artwork from Wikipedia.
+  const details = wdIds.length
+    ? await fetchWikidataDetails(wdIds).catch((err) => {
+        console.error("[game-provider] Wikidata claims failed:", err);
+        return new Map<string, WikidataDetails>();
+      })
+    : new Map<string, WikidataDetails>();
+
+  const referencedIds: string[] = [];
+  for (const d of details.values()) {
+    referencedIds.push(
+      ...d.platformIds,
+      ...d.developerIds.slice(0, 1),
+      ...d.publisherIds.slice(0, 1),
+    );
+  }
+  const labels = referencedIds.length
+    ? await fetchWikidataLabels(referencedIds).catch((err) => {
+        console.error("[game-provider] Wikidata labels failed:", err);
+        return new Map<string, string>();
+      })
+    : new Map<string, string>();
+
+  return pages.flatMap((p): GameSearchResult[] => {
+    const title = cleanWikipediaTitle(p.title ?? "");
+    if (!title) return [];
+    const qid = p.pageprops?.wikibase_item;
+    const d = qid ? details.get(qid) : undefined;
+    const thumb = p.thumbnail?.source ?? null;
+    const original = p.original?.source ?? null;
+    const developer =
+      d?.developerIds.map((id) => labels.get(id)).find(Boolean) ?? null;
+    const publisher =
+      d?.publisherIds.map((id) => labels.get(id)).find(Boolean) ?? null;
+    return [
+      {
+        externalId: `wikipedia:${p.pageid ?? qid ?? title}`,
+        source: "wikipedia",
+        title,
+        coverUrl: thumb,
+        heroUrl: original ?? thumb,
+        summary: p.extract?.trim() || p.description?.trim() || null,
+        developer,
+        publisher,
+        genres: [],
+        platforms: d
+          ? shortPlatforms(d.platformIds.map((id) => labels.get(id)))
+          : [],
+        releaseYear: d?.year ?? null,
+        releaseDate: d?.date ?? null,
+        criticScore: null,
+      } satisfies GameSearchResult,
+    ];
+  });
+}
+
+// -------------------------------------------------------------- Merge -----
+
+function normalizeTitle(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function mergeOne(
+  target: GameSearchResult,
+  source: GameSearchResult,
+): void {
+  target.coverUrl = target.coverUrl ?? source.coverUrl;
+  target.heroUrl = target.heroUrl ?? source.heroUrl;
+  target.summary = target.summary ?? source.summary;
+  target.developer = target.developer ?? source.developer;
+  target.publisher = target.publisher ?? source.publisher;
+  if (target.genres.length === 0 && source.genres.length > 0) {
+    target.genres = source.genres;
+  }
+  if (target.platforms.length === 0 && source.platforms.length > 0) {
+    target.platforms = source.platforms;
+  }
+  target.releaseYear = target.releaseYear ?? source.releaseYear;
+  target.releaseDate = target.releaseDate ?? source.releaseDate;
+  target.criticScore = target.criticScore ?? source.criticScore;
+}
+
+/**
+ * Interleave the two ranked lists (Wikipedia first for console coverage, then
+ * Steam), de-duplicating by normalised title. When the same game appears in
+ * both, the surviving entry is back-filled with any missing fields from the
+ * other source.
+ */
+function mergeResults(
+  wikipedia: GameSearchResult[],
+  steam: GameSearchResult[],
+): GameSearchResult[] {
+  const byKey = new Map<string, GameSearchResult>();
+  const order: string[] = [];
+  const add = (r: GameSearchResult) => {
+    const key = normalizeTitle(r.title);
+    if (!key) return;
+    const existing = byKey.get(key);
+    if (existing) {
+      mergeOne(existing, r);
+      return;
+    }
+    byKey.set(key, { ...r });
+    order.push(key);
+  };
+
+  let i = 0;
+  let j = 0;
+  while (i < wikipedia.length || j < steam.length) {
+    if (i < wikipedia.length) add(wikipedia[i++]);
+    if (j < steam.length) add(steam[j++]);
+  }
+  return order.map((k) => byKey.get(k)!).slice(0, MAX_RESULTS);
 }
 
 // ---------------------------------------------------------------- API -----
@@ -263,36 +426,29 @@ export async function searchGames(query: string): Promise<SearchResponse> {
   const q = query.trim();
   if (!q) return { results: [], provider: null };
 
-  const hasIgdb = Boolean(
-    (process.env.IGDB_CLIENT_ID ?? process.env.TWITCH_CLIENT_ID) &&
-      (process.env.IGDB_CLIENT_SECRET ?? process.env.TWITCH_CLIENT_SECRET),
-  );
-  const hasRawg = Boolean(process.env.RAWG_API_KEY);
+  const [wikiSettled, steamSettled] = await Promise.allSettled([
+    searchWikipedia(q),
+    searchSteam(q),
+  ]);
 
-  if (hasIgdb) {
-    try {
-      const results = await searchIgdb(q);
-      return { results, provider: "igdb" };
-    } catch (err) {
-      console.error("[game-provider] IGDB failed:", err);
-    }
+  if (wikiSettled.status === "rejected") {
+    console.error("[game-provider] Wikipedia failed:", wikiSettled.reason);
+  }
+  if (steamSettled.status === "rejected") {
+    console.error("[game-provider] Steam failed:", steamSettled.reason);
   }
 
-  if (hasRawg) {
-    try {
-      const results = await searchRawg(q);
-      return { results, provider: "rawg" };
-    } catch (err) {
-      console.error("[game-provider] RAWG failed:", err);
-    }
-  }
+  const wikiResults =
+    wikiSettled.status === "fulfilled" ? wikiSettled.value : [];
+  const steamResults =
+    steamSettled.status === "fulfilled" ? steamSettled.value : [];
 
-  try {
-    const results = await searchSteam(q);
-    return { results, provider: "steam" };
-  } catch (err) {
-    console.error("[game-provider] Steam failed:", err);
-  }
-
-  return { results: [], provider: null };
+  const results = mergeResults(wikiResults, steamResults);
+  const provider =
+    results.length === 0
+      ? null
+      : results.some((r) => r.source === "wikipedia")
+        ? "wikipedia"
+        : "steam";
+  return { results, provider };
 }

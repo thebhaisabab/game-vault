@@ -45,11 +45,15 @@ export interface ConsoleDeal {
   url: string;
 }
 
+export type ConsoleCurrency = "USD" | "GBP" | "EUR" | "JPY" | "TRY";
+
 export interface FxRates {
   /** How many BDT 1 TRY buys. */
   bdtPerTry: number;
   /** How many TRY 1 BDT buys. */
   tryPerBdt: number;
+  /** Live BDT rate per 1 unit of each console-board currency. */
+  bdtRates: Record<ConsoleCurrency, number>;
   asOf: string;
   source: "live" | "fallback";
 }
@@ -60,9 +64,17 @@ export interface FxRates {
 export const FX_FALLBACK: Omit<FxRates, "asOf"> & { asOf: string } = {
   bdtPerTry: 2.9,
   tryPerBdt: 1 / 2.9,
+  bdtRates: { USD: 120.5, GBP: 156.2, EUR: 131.1, JPY: 0.8, TRY: 2.9 },
   asOf: "2026-11 (offline estimate)",
   source: "fallback",
 };
+
+/** A console-board row after server-side FX conversion. */
+export interface EnrichedConsoleDeal extends ConsoleDeal {
+  /** Price converted to Taka, null when no rate is available. */
+  bdtPrice: number | null;
+  source: "live" | "curated";
+}
 
 // ------------------------------------------- PSN Turkey curated snapshot --
 

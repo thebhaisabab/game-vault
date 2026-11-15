@@ -26,11 +26,8 @@ npm run dev
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string (required). Powers cross-device sync. |
-| `IGDB_CLIENT_ID` + `IGDB_CLIENT_SECRET` | **Best option.** IGDB covers ~200k games incl. every console. Create a free [Twitch developer app](https://dev.twitch.tv/console/apps), use its Client ID/Secret. |
-| `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET` | Accepted aliases for the IGDB credentials above. |
-| `RAWG_API_KEY` | Fallback search provider. Free key at [rawg.io/apidocs](https://rawg.io/apidocs). |
 
-> No keys configured? The app still works: it falls back to the keyless PC catalogue, and every game can also be added **manually** from the search panel. Add IGDB creds later and restart — no code changes needed.
+> Search works out of the box with **zero API keys** — the catalogue comes from the public Steam Store search API and the public Wikipedia/Wikidata APIs, covering PC, PlayStation, Xbox, Nintendo and retro titles with cover/header artwork, release years, descriptions, developer and publisher. Nothing else to configure. Every game can also be added **manually** from the search panel.
 
 ## Host it on GitHub
 
@@ -51,7 +48,7 @@ Because the library syncs through a database, deploy to a host that runs the Nex
 
 1. Create a free Postgres database on [Neon](https://neon.tech), [Supabase](https://supabase.com), or Vercel Postgres. Copy its connection string.
 2. Import your GitHub repo at [vercel.com/new](https://vercel.com/new).
-3. Add env vars in project settings: `DATABASE_URL` (and optionally `IGDB_CLIENT_ID` / `IGDB_CLIENT_SECRET` or `RAWG_API_KEY`).
+3. Add env vars in project settings: `DATABASE_URL`. Search needs no keys — it uses the public Steam Store and Wikipedia/Wikidata APIs out of the box.
 4. Deploy, then create the tables once:
    ```bash
    DATABASE_URL="<your-production-db-url>" npx drizzle-kit push

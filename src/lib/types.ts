@@ -6,7 +6,7 @@ export type GameStatus =
   | "paused"
   | "dropped";
 
-export type GameProviderId = "igdb" | "rawg" | "steam" | "manual";
+export type GameProviderId = "steam" | "wikipedia" | "manual";
 
 export interface GameSearchResult {
   externalId: string;

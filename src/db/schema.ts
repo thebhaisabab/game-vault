@@ -16,7 +16,7 @@ export const libraryGames = pgTable(
   {
     id: serial("id").primaryKey(),
 
-    // ---- Game metadata (sourced from IGDB / RAWG / Steam) ----
+    // ---- Game metadata (sourced from Wikipedia / Steam) ----
     externalId: text("external_id").unique(),
     source: text("source").default("manual"),
     title: text("title").notNull(),

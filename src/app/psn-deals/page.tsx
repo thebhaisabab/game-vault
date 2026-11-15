@@ -7,6 +7,8 @@ import {
   BadgePercent,
   Check,
   ChevronDown,
+  ClipboardPaste,
+  Database,
   ExternalLink,
   Gamepad2,
   Globe2,
@@ -52,6 +54,8 @@ interface ApiPayload {
   };
   gamesFetchedAt?: string | null;
   consolesFetchedAt?: string | null;
+  /** Timestamp of the games data shown — live fetch time, or the Neon cache row's write time. */
+  lastSyncAt?: string | null;
   campaigns?: DealCampaign[];
   category?: string;
   consolesAsOf: string;
@@ -221,6 +225,14 @@ export default function PsnDealsPage() {
   // deals hub directly from the user's browser through a public CORS relay.
   const [rescueState, setRescueState] = useState<"idle" | "busy" | "ok" | "failed">("idle");
   const categoryRef = useRef(category);
+  // "Sync from PSN Tab" — paste the __NEXT_DATA__ Apollo state copied from an
+  // open deals-hub tab; it is parsed server-side and saved to the Neon cache.
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncText, setSyncText] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [snippetCopied, setSnippetCopied] = useState(false);
 
   const [tryVal, setTryVal] = useState("1000");
   const [bdtVal, setBdtVal] = useState("");
@@ -228,6 +240,94 @@ export default function PsnDealsPage() {
   useEffect(() => {
     categoryRef.current = category;
   }, [category]);
+
+  const SYNC_SNIPPET = "copy(JSON.stringify(window.__NEXT_DATA__))";
+
+  const copySnippet = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(SYNC_SNIPPET);
+      setSnippetCopied(true);
+      window.setTimeout(() => setSnippetCopied(false), 2000);
+    } catch {
+      // clipboard blocked — the snippet stays selectable in the code box
+    }
+  }, []);
+
+  /** Close the modal on Escape. */
+  useEffect(() => {
+    if (!syncOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSyncOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [syncOpen]);
+
+  /**
+   * "Sync from PSN Tab": send the pasted __NEXT_DATA__ to the API — it parses
+   * Sony's exact Apollo state, saves the deals + campaign tabs to the Neon
+   * cache, and the response carries the imported grid for an instant render.
+   */
+  const submitSync = useCallback(async () => {
+    const trimmed = syncText.trim();
+    if (!trimmed || syncBusy) return;
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      const res = await fetch("/api/psn-deals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nextData: trimmed }),
+      });
+      const json = (await res.json()) as {
+        ok?: boolean;
+        games?: PsnDealGame[];
+        campaigns?: DealCampaign[];
+        importedGames?: number;
+        importedCampaigns?: number;
+        provider?: string;
+        lastSyncAt?: string;
+        error?: string;
+        hint?: string;
+      };
+      if (!res.ok || !json.ok) {
+        setSyncError(
+          json.hint
+            ? `${json.error ?? "Import failed"} — ${json.hint}`
+            : (json.error ?? `Import failed (HTTP ${res.status})`),
+        );
+        return;
+      }
+      const stamp = json.lastSyncAt ?? new Date().toISOString();
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              games: json.games ?? [],
+              campaigns: json.campaigns ?? d.campaigns,
+              sources: {
+                ...d.sources,
+                games: "cache",
+                gamesProvider: json.provider ?? "store.playstation.com (manual sync)",
+              },
+              gamesFetchedAt: stamp,
+              lastSyncAt: stamp,
+            }
+          : d,
+      );
+      setSyncNotice(
+        `Synced ${json.importedGames ?? 0} live deals + ${json.importedCampaigns ?? 0} campaign tabs from your PSN tab · saved to Neon · visible on all devices`,
+      );
+      setSyncText("");
+      setSyncOpen(false);
+      setRescueState("idle");
+    } catch (err) {
+      console.error("[psn-deals] manual sync failed:", err);
+      setSyncError("Network error while importing — nothing was saved.");
+    } finally {
+      setSyncBusy(false);
+    }
+  }, [syncText, syncBusy]);
 
   /**
    * Browser-side rescue: fetch the deals page from the USER's network via a
@@ -299,7 +399,7 @@ export default function PsnDealsPage() {
             }
           : d,
       );
-      if (json.source !== "live") {
+      if (json.source === "unavailable") {
         void clientRescueDeals(id);
       } else {
         setRescueState("idle");
@@ -334,7 +434,7 @@ export default function PsnDealsPage() {
           prev !== "" ? prev : (1000 * json.fx.bdtPerTry).toFixed(2),
         );
         setLoadError(false);
-        if (json.sources?.games !== "live") {
+        if (json.sources?.games === "unavailable") {
           void clientRescueDeals();
         } else {
           setRescueState("idle");
@@ -559,7 +659,9 @@ export default function PsnDealsPage() {
   const gameSourceLabel =
     data?.sources.games === "live"
       ? `LIVE SOURCE: ${(data?.sources.gamesProvider ?? "store.playstation.com").toUpperCase()}`
-      : "PSN TR UNAVAILABLE";
+      : data?.sources.games === "cache"
+        ? "CACHED SYNC · NEON"
+        : "PSN TR UNAVAILABLE";
   const fxLabel =
     data?.fx.source === "live"
       ? `LIVE SOURCE: ${(data?.sources.fxProvider ?? "open.er-api.com").toUpperCase()}`
@@ -587,7 +689,8 @@ export default function PsnDealsPage() {
           <div className="flex items-center gap-2 sm:gap-3">
             {data?.lastLiveFetch && (
               <span className="hidden font-mono text-[9px] tracking-[0.18em] text-volt/70 uppercase md:inline">
-                Last live fetch · {new Date(data.lastLiveFetch).toLocaleString()}
+                {data.sources.games === "cache" ? "Last synced" : "Last live fetch"} ·{" "}
+                {new Date(data.lastLiveFetch).toLocaleString()}
               </span>
             )}
             <button
@@ -606,6 +709,15 @@ export default function PsnDealsPage() {
               title="Bypass cache and hit the live stores now"
             >
               Force live refresh
+            </button>
+            <button
+              onClick={() => { setSyncError(null); setSyncOpen(true); }}
+              className="inline-flex h-9 w-9 items-center justify-center gap-2 rounded-lg border border-cyan/50 bg-cyan/10 font-mono text-[9px] font-extrabold tracking-[0.18em] whitespace-nowrap text-cyan uppercase transition-all hover:bg-cyan hover:text-void sm:w-auto sm:px-3"
+              title="Paste window.__NEXT_DATA__ from your open PS Store deals tab — parsed exactly as Sony shipped it and saved to Neon"
+              aria-label="Sync live deals from your PSN tab"
+            >
+              <ClipboardPaste size={13} strokeWidth={2.2} />
+              <span className="hidden sm:inline">Sync from PSN tab</span>
             </button>
           </div>
         </div>
@@ -672,6 +784,15 @@ export default function PsnDealsPage() {
                   Live from {data.sources.gamesProvider ?? "store.playstation.com"} · fetched{" "}
                   {data.gamesFetchedAt ? new Date(data.gamesFetchedAt).toLocaleString() : "—"} · 30-min cache · Force Live Refresh to bypass
                 </p>
+              ) : data.sources.games === "cache" ? (
+                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-cyan/90 uppercase">
+                  Cached deals · last synced{" "}
+                  {data.gamesFetchedAt
+                    ? new Date(data.gamesFetchedAt).toLocaleString()
+                    : "—"}{" "}
+                  · live fetch blocked from the server — showing the shared Neon
+                  copy · Force Live Refresh to retry
+                </p>
               ) : rescueState === "busy" ? (
                 <p className="mb-3 inline-flex items-center gap-2 font-mono text-[9px] tracking-[0.14em] text-cyan/90 uppercase">
                   <Loader2 size={11} className="animate-spin" /> Server blocked — fetching live deals straight from your browser via allorigins.win…
@@ -688,6 +809,11 @@ export default function PsnDealsPage() {
               {!data.watchlistOk && (
                 <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-cyan/80 uppercase">
                   Watchlist stored in this browser only (DATABASE_URL not configured or DB unreachable) — cross-device sync needs the Neon database
+                </p>
+              )}
+              {syncNotice && (
+                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-volt/90 uppercase">
+                  {syncNotice}
                 </p>
               )}
 
@@ -1274,6 +1400,118 @@ export default function PsnDealsPage() {
           </p>
         </footer>
       </div>
+{/* ================= sync from PSN tab — modal ================= */}
+      {syncOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Sync live deals from your PSN tab"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4"
+          onClick={() => setSyncOpen(false)}
+        >
+          <div
+            className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-line bg-panel p-5 shadow-2xl sm:rounded-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[9px] font-bold tracking-[0.3em] text-cyan uppercase">
+                  Zero-failure backup importer
+                </p>
+                <h3 className="font-display mt-1 text-lg font-bold text-white">
+                  Sync live deals from your PSN tab
+                </h3>
+              </div>
+              <button
+                onClick={() => setSyncOpen(false)}
+                aria-label="Close sync dialog"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-line text-white/60 transition-colors hover:border-volt/50 hover:text-volt"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <ol className="mb-3 space-y-2 text-[11px] leading-relaxed text-ink-dim">
+              <li>
+                <span className="font-mono font-bold text-volt">1.</span> Open the{" "}
+                <a
+                  href="https://store.playstation.com/en-tr/pages/deals"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-cyan underline underline-offset-2 transition-colors hover:text-white"
+                >
+                  TR deals hub
+                </a>{" "}
+                (or the All Deals category) while signed in to your PSN account.
+              </li>
+              <li>
+                <span className="font-mono font-bold text-volt">2.</span> Press{" "}
+                <kbd className="rounded border border-line bg-void px-1.5 py-0.5 font-mono text-[10px] text-white/80">F12</kbd>{" "}
+                → <span className="text-white/80">Console</span>, paste this and hit Enter:
+              </li>
+            </ol>
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-line bg-void px-3 py-2">
+              <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-volt">
+                copy(JSON.stringify(window.__NEXT_DATA__))
+              </code>
+              <button
+                onClick={copySnippet}
+                className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-cyan/40 bg-cyan/10 px-2 font-mono text-[8px] font-bold tracking-[0.18em] text-cyan uppercase transition-all hover:bg-cyan hover:text-void"
+              >
+                {snippetCopied ? <Check size={11} /> : <ClipboardPaste size={11} />}
+                {snippetCopied ? "Copied" : "Copy"}
+              </button>
+            </div>
+
+            <label
+              htmlFor="sync-paste"
+              className="mb-1 block font-mono text-[8px] font-bold tracking-[0.22em] text-white/40 uppercase"
+            >
+              3. Paste the copied JSON here
+            </label>
+            <textarea
+              id="sync-paste"
+              rows={5}
+              value={syncText}
+              onChange={(e) => setSyncText(e.target.value)}
+              spellCheck={false}
+              placeholder='{"props":{"pageProps":{ … }}}'
+              className="w-full resize-y rounded-lg border border-line bg-void p-3 font-mono text-[10px] leading-relaxed text-white/85 outline-none placeholder:text-white/20 focus:border-cyan/60"
+            />
+            {syncError && (
+              <p className="mt-2 rounded-lg border border-rose/30 bg-rose/5 px-3 py-2 font-mono text-[9px] leading-relaxed text-rose">
+                {syncError}
+              </p>
+            )}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setSyncOpen(false)}
+                className="h-9 rounded-lg border border-line px-4 font-mono text-[9px] font-bold tracking-[0.18em] text-white/60 uppercase transition-colors hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitSync}
+                disabled={syncBusy || syncText.trim().length === 0}
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-volt/60 bg-volt/15 px-4 font-mono text-[9px] font-extrabold tracking-[0.18em] text-volt uppercase transition-all hover:bg-volt hover:text-void disabled:opacity-40"
+              >
+                {syncBusy ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Database size={12} />
+                )}
+                {syncBusy ? "Importing…" : "Import & save"}
+              </button>
+            </div>
+            <p className="mt-3 font-mono text-[8px] leading-relaxed tracking-[0.12em] text-white/30 uppercase">
+              Parsed exactly as Sony shipped it — never guessed. Saved to your
+              Neon database (psn_deals_cache) and served on all devices with a
+              Last Synced timestamp.
+            </p>
+          </div>
+        </div>
+      )}
     </main>
+
   );
 }

@@ -76,42 +76,22 @@ export interface EnrichedConsoleDeal extends ConsoleDeal {
   source: "live" | "curated";
 }
 
-// ------------------------------------------- PSN Turkey curated snapshot --
+// ------------------------------------------------- PSN Turkey deals hub ---
+// The PSN Turkey Deals hub is mirrored live from
+// https://store.playstation.com/en-tr/pages/deals (campaign collections) and
+// its All Deals category. There is deliberately NO offline game snapshot —
+// when every live endpoint fails the UI shows an honest "unavailable" state
+// instead of outdated titles.
 
-export const TURKEY_SNAPSHOT_AS_OF = "Nov 2026";
+/** Category id for the default "All Deals" collection on the TR deals hub. */
+export const ALL_DEALS_CATEGORY = "5943115d-1af0-42e6-ae2e-59c7add02048";
 
-const ps = (title: string) =>
-  `https://store.playstation.com/tr-tr/search/${encodeURIComponent(title)}`;
-
-export const TURKEY_SNAPSHOT_GAMES: Array<
-  Omit<PsnDealGame, "discountPct" | "url">
-> = [
-  { id: "snap-tr-01", title: "God of War Ragnarök", platforms: ["PS5", "PS4"], basePrice: 2399, salePrice: 959, coverUrl: null },
-  { id: "snap-tr-02", title: "Marvel's Spider-Man 2", platforms: ["PS5"], basePrice: 3099, salePrice: 1549, coverUrl: null },
-  { id: "snap-tr-03", title: "The Last of Us Part I", platforms: ["PS5", "PS4"], basePrice: 2899, salePrice: 869, coverUrl: null },
-  { id: "snap-tr-04", title: "The Last of Us Part II Remastered", platforms: ["PS5"], basePrice: 3299, salePrice: 1979, coverUrl: null },
-  { id: "snap-tr-05", title: "Horizon Forbidden West: Complete Edition", platforms: ["PS5", "PS4"], basePrice: 2799, salePrice: 1119, coverUrl: null },
-  { id: "snap-tr-06", title: "Ghost of Tsushima Director's Cut", platforms: ["PS5", "PS4"], basePrice: 2499, salePrice: 999, coverUrl: null },
-  { id: "snap-tr-07", title: "Ratchet & Clank: Rift Apart", platforms: ["PS5"], basePrice: 2199, salePrice: 659, coverUrl: null },
-  { id: "snap-tr-08", title: "Gran Turismo 7", platforms: ["PS5", "PS4"], basePrice: 2699, salePrice: 1349, coverUrl: null },
-  { id: "snap-tr-09", title: "Returnal", platforms: ["PS5"], basePrice: 2399, salePrice: 719, coverUrl: null },
-  { id: "snap-tr-10", title: "Death Stranding: Director's Cut", platforms: ["PS5"], basePrice: 2099, salePrice: 629, coverUrl: null },
-  { id: "snap-tr-11", title: "Demon's Souls", platforms: ["PS5"], basePrice: 3499, salePrice: 1749, coverUrl: null },
-  { id: "snap-tr-12", title: "Uncharted: Legacy of Thieves Collection", platforms: ["PS5", "PS4"], basePrice: 2899, salePrice: 869, coverUrl: null },
-  { id: "snap-tr-13", title: "It Takes Two", platforms: ["PS5", "PS4"], basePrice: 999, salePrice: 249, coverUrl: null },
-  { id: "snap-tr-14", title: "Elden Ring", platforms: ["PS5"], basePrice: 2499, salePrice: 1499, coverUrl: null },
-  { id: "snap-tr-15", title: "FC 26", platforms: ["PS5", "PS4"], basePrice: 2599, salePrice: 1819, coverUrl: null },
-  { id: "snap-tr-16", title: "Resident Evil Requiem", platforms: ["PS5"], basePrice: 3199, salePrice: 2559, coverUrl: null },
-];
-
-export function withDiscount(
-  g: Omit<PsnDealGame, "discountPct" | "url">,
-): PsnDealGame {
-  const discountPct =
-    g.basePrice > 0
-      ? Math.min(95, Math.max(1, Math.round((1 - g.salePrice / g.basePrice) * 100)))
-      : 0;
-  return { ...g, discountPct, url: ps(g.title) };
+/** A selectable deal campaign pill, e.g. "All Deals", "Black Friday". */
+export interface DealCampaign {
+  /** Category UUID used in store.playstation.com/en-tr/category/<id>/1 */
+  id: string;
+  title: string;
+  imageUrl: string | null;
 }
 
 // --------------------------- Worldwide console board · Nov 2026 baseline ---

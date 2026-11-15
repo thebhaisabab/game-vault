@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -20,10 +20,12 @@ import {
   X,
 } from "lucide-react";
 import {
+  ALL_DEALS_CATEGORY,
   MARKET_ORDER,
   formatConsolePrice,
   formatTry,
   type ConsoleMarket,
+  type DealCampaign,
   type FxRates,
   type PsnAvailability,
   type PsnDealGame,
@@ -49,7 +51,8 @@ interface ApiPayload {
   };
   gamesFetchedAt?: string | null;
   consolesFetchedAt?: string | null;
-  gamesAsOf: string | null;
+  campaigns?: DealCampaign[];
+  category?: string;
   consolesAsOf: string;
   lastLiveFetch: string | null;
   cacheMaxAgeSeconds: number;
@@ -168,31 +171,90 @@ export default function PsnDealsPage() {
   const [watchError, setWatchError] = useState<string | null>(null);
   const [watchBusy, setWatchBusy] = useState(false);
   const [lookups, setLookups] = useState<Record<string, LiveLookup>>({});
+  const [category, setCategory] = useState(ALL_DEALS_CATEGORY.toLowerCase());
+  const [categoryBusy, setCategoryBusy] = useState(false);
+  const categoryRef = useRef(category);
 
   const [tryVal, setTryVal] = useState("1000");
   const [bdtVal, setBdtVal] = useState("");
 
-  const fetchData = useCallback(async (force = false) => {
+  useEffect(() => {
+    categoryRef.current = category;
+  }, [category]);
+
+  /** Fetch the deals grid for ONE campaign category (light payload). */
+  const loadCategory = useCallback(async (id: string, force = false) => {
+    setCategoryBusy(true);
+    setCategory(id);
     try {
       const res = await fetch(
-        force ? "/api/psn-deals?refresh=1" : "/api/psn-deals",
+        `/api/psn-deals?category=${encodeURIComponent(id)}${force ? "&refresh=1" : ""}`,
         { cache: "no-store" },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as ApiPayload;
-      setData(json);
-      setBdtVal((prev) =>
-        prev !== "" ? prev : (1000 * json.fx.bdtPerTry).toFixed(2),
+      const json = (await res.json()) as {
+        games?: PsnDealGame[];
+        source?: "live" | "unavailable";
+        provider?: string | null;
+        fetchedAt?: string | null;
+      };
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              games: json.games ?? [],
+              sources: {
+                ...d.sources,
+                games: json.source === "live" ? "live" : "unavailable",
+                gamesProvider: json.provider ?? null,
+              },
+              gamesFetchedAt: json.fetchedAt ?? null,
+            }
+          : d,
       );
-      setLoadError(false);
     } catch (err) {
-      console.error("[psn-deals] load failed:", err);
-      setLoadError(true);
+      console.error("[psn-deals] campaign load failed:", err);
+      setData((d) =>
+        d
+          ? { ...d, games: [], sources: { ...d.sources, games: "unavailable" } }
+          : d,
+      );
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      setCategoryBusy(false);
     }
   }, []);
+
+  const fetchData = useCallback(
+    async (force = false) => {
+      try {
+        const res = await fetch(
+          force ? "/api/psn-deals?refresh=1" : "/api/psn-deals",
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as ApiPayload;
+        setData(json);
+        setBdtVal((prev) =>
+          prev !== "" ? prev : (1000 * json.fx.bdtPerTry).toFixed(2),
+        );
+        setLoadError(false);
+        // Full payload always carries the default All Deals grid — if the
+        // user is viewing another campaign, re-overlay it (force-refresh
+        // must refresh the visible category too, not snap it back).
+        const active = categoryRef.current;
+        if (active !== ALL_DEALS_CATEGORY.toLowerCase()) {
+          await loadCategory(active, force);
+        }
+      } catch (err) {
+        console.error("[psn-deals] load failed:", err);
+        setLoadError(true);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [loadCategory],
+  );
 
   useEffect(() => {
     // Data fetch on mount; setState happens after awaits, not synchronously.
@@ -377,7 +439,7 @@ export default function PsnDealsPage() {
   const gameSourceLabel =
     data?.sources.games === "live"
       ? `LIVE SOURCE: ${(data?.sources.gamesProvider ?? "store.playstation.com").toUpperCase()}`
-      : `SNAPSHOT · ${data?.gamesAsOf ?? "OFFLINE"}`;
+      : "PSN TR UNAVAILABLE";
   const fxLabel =
     data?.fx.source === "live"
       ? `LIVE SOURCE: ${(data?.sources.fxProvider ?? "open.er-api.com").toUpperCase()}`
@@ -492,7 +554,7 @@ export default function PsnDealsPage() {
                 </p>
               ) : (
                 <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-amber/80 uppercase">
-                  Offline snapshot · prices as of {data.gamesAsOf} · verify in-store before buying
+                  PSN Turkey deals unavailable — PS Store unreachable/blocked and all live aggregators failed · no fake games are shown · Force Live Refresh to retry
                 </p>
               )}
               {!data.watchlistOk && (
@@ -504,6 +566,44 @@ export default function PsnDealsPage() {
               <div className="grid gap-4 lg:grid-cols-3">
                 {/* -------- main deals column -------- */}
                 <div className="lg:col-span-2">
+                  {/* deal campaign pills (mirrors the official PS Store deals hub) */}
+                  <div
+                    role="tablist"
+                    aria-label="Deal campaigns"
+                    className="mb-3 flex flex-wrap items-center gap-2"
+                  >
+                    {(data.campaigns ?? []).map((c) => {
+                      const active = category === c.id;
+                      return (
+                        <button
+                          key={c.id}
+                          role="tab"
+                          aria-selected={active}
+                          disabled={categoryBusy}
+                          onClick={() => loadCategory(c.id)}
+                          title={`Show ${c.title} deals`}
+                          className={`inline-flex h-8 items-center gap-2 rounded-lg border px-3 font-mono text-[9px] font-bold tracking-[0.16em] whitespace-nowrap uppercase transition-all disabled:opacity-60 ${
+                            active
+                              ? "border-volt bg-volt text-void shadow-[0_0_18px_rgba(200,255,62,0.25)]"
+                              : "border-line bg-panel text-white/60 hover:border-volt/50 hover:text-volt"
+                          }`}
+                        >
+                          {c.imageUrl && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={c.imageUrl}
+                              alt=""
+                              aria-hidden
+                              className="h-4 w-6 rounded-sm object-cover"
+                            />
+                          )}
+                          {c.title}
+                          {active && categoryBusy && <Loader2 size={11} className="animate-spin" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+
                   {/* controls */}
                   <div className="mb-3 flex flex-wrap items-center gap-2">
                     <label className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-line bg-panel px-3 focus-within:border-volt/50">
@@ -562,9 +662,26 @@ export default function PsnDealsPage() {
                   {/* deals grid */}
                   {filteredGames.length === 0 ? (
                     <div className="rounded-2xl border border-line bg-panel/50 p-10 text-center">
-                      <p className="font-mono text-[10px] tracking-[0.18em] text-white/40 uppercase">
-                        No deals match “{query}”{watchlistOnly ? " in your watchlist" : ""}
-                      </p>
+                      {query || watchlistOnly ? (
+                        <p className="font-mono text-[10px] tracking-[0.18em] text-white/40 uppercase">
+                          No deals match “{query || "watchlist"}”{watchlistOnly ? " in your watchlist" : ""}
+                        </p>
+                      ) : (
+                        <>
+                          <p className="font-mono text-[10px] tracking-[0.18em] text-amber/80 uppercase">
+                            Live PSN Turkey deals couldn&apos;t be loaded
+                          </p>
+                          <p className="mt-2 font-mono text-[9px] tracking-[0.14em] text-white/35 uppercase">
+                            PS Store unreachable/blocked and all live aggregators failed
+                          </p>
+                          <button
+                            onClick={() => { setRefreshing(true); fetchData(true); }}
+                            className="mt-4 inline-flex items-center gap-2 rounded-lg border border-volt/50 px-4 py-2 font-mono text-[10px] font-bold tracking-[0.2em] text-volt uppercase transition-colors hover:bg-volt hover:text-void"
+                          >
+                            <RefreshCw size={13} /> Force live refresh
+                          </button>
+                        </>
+                      )}
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
@@ -747,18 +864,15 @@ export default function PsnDealsPage() {
                                     {d.discountPct > 0 ? (
                                       <>
                                         <span className="rounded bg-amber/15 px-1 py-0.5 text-[8px] font-extrabold text-amber">
-                                          LIVE −{d.discountPct}%
+                                          ON SALE · LIVE −{d.discountPct}%
                                         </span>
                                         <span className="font-bold text-volt">{formatTry(d.salePrice)}</span>
                                         <span className="text-[8px] text-white/35 line-through">{formatTry(d.basePrice)}</span>
                                       </>
                                     ) : (
-                                      <>
-                                        <span className="text-[8px] font-extrabold tracking-[0.15em] text-white/45 uppercase">
-                                          Full price
-                                        </span>
-                                        <span className="font-bold text-white/80">{formatTry(d.basePrice)}</span>
-                                      </>
+                                      <span className="text-[8px] tracking-[0.15em] text-white/35 uppercase">
+                                        No active discount · {formatTry(d.basePrice)}
+                                      </span>
                                     )}
                                   </span>
                                 );

@@ -18,7 +18,7 @@ Next.js (App Router) · React 19 · Tailwind CSS v4 · framer-motion · Drizzle 
 ```bash
 npm install
 cp .env.example .env        # fill in values below
-npx drizzle-kit push        # create the tables (library + psn_watchlist)
+npx drizzle-kit push        # create the library tables (psn_watchlist self-creates)
 npm run dev
 ```
 
@@ -26,7 +26,7 @@ npm run dev
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string (required). Powers cross-device sync. |
+| `DATABASE_URL` | PostgreSQL connection string. Powers cross-device sync; `psn_watchlist` self-creates on first request (idempotent `CREATE TABLE IF NOT EXISTS`) and the UI falls back to browser-local storage when it's missing. |
 
 > Search works out of the box with **zero API keys** — the catalogue comes from the public Steam Store search API and the public Wikipedia/Wikidata APIs, covering PC, PlayStation, Xbox, Nintendo and retro titles with cover/header artwork, release years, descriptions, developer and publisher. Nothing else to configure. Every game can also be added **manually** from the search panel.
 
@@ -50,11 +50,11 @@ Because the library syncs through a database, deploy to a host that runs the Nex
 1. Create a free Postgres database on [Neon](https://neon.tech), [Supabase](https://supabase.com), or Vercel Postgres. Copy its connection string.
 2. Import your GitHub repo at [vercel.com/new](https://vercel.com/new).
 3. Add env vars in project settings: `DATABASE_URL`. Search needs no keys — it uses the public Steam Store and Wikipedia/Wikidata APIs out of the box.
-4. Deploy, then create the tables once:
+4. Deploy. Done — the watchlist table creates itself on first use; the library tables:
    ```bash
    DATABASE_URL="<your-production-db-url>" npx drizzle-kit push
    ```
-5. Done — open the URL on any device and your library follows you.
+   Without `DATABASE_URL` the app still deploys fine — the PSN watchlist is stored in the browser instead of synced.
 
 ## Keyboard shortcuts
 

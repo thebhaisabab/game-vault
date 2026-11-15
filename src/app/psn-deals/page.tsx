@@ -31,6 +31,7 @@ import {
   type PsnDealGame,
   type EnrichedConsoleDeal,
 } from "@/lib/psn-deals-data";
+import { parseDealsHubHtml } from "@/lib/psn-deal-parser";
 
 // ------------------------------------------------------------------ types --
 
@@ -74,6 +75,49 @@ const norm = (t: string) =>
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "");
+
+// -------------------------------------- localStorage watchlist fallback --
+// When the server-side watchlist DB is unavailable (DATABASE_URL missing, or
+// Neon unreachable), the watchlist transparently falls back to the browser so
+// the feature keeps working with zero setup.
+const WATCHLIST_KEY = "psn-gamevault-watchlist";
+
+const readLocalWatchlist = (): string[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(WATCHLIST_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((t): t is string => typeof t === "string").slice(0, 200)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeLocalWatchlist = (titles: string[]) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(WATCHLIST_KEY, JSON.stringify(titles));
+  } catch {
+    // quota / private mode — non-fatal
+  }
+};
+
+/** Union of server list + locally stored titles (deduped), persisted locally. */
+const mergeLocalWatchlist = (serverTitles: string[]): string[] => {
+  const seen = new Set(serverTitles.map(norm));
+  const out = [...serverTitles];
+  for (const t of readLocalWatchlist()) {
+    if (!seen.has(norm(t))) {
+      seen.add(norm(t));
+      out.push(t);
+    }
+  }
+  writeLocalWatchlist(out);
+  return out;
+};
 
 const AVAIL_META: Record<
   PsnAvailability,
@@ -173,6 +217,9 @@ export default function PsnDealsPage() {
   const [lookups, setLookups] = useState<Record<string, LiveLookup>>({});
   const [category, setCategory] = useState(ALL_DEALS_CATEGORY.toLowerCase());
   const [categoryBusy, setCategoryBusy] = useState(false);
+  // Browser-side rescue: when the server is blocked by Akamai, fetch the
+  // deals hub directly from the user's browser through a public CORS relay.
+  const [rescueState, setRescueState] = useState<"idle" | "busy" | "ok" | "failed">("idle");
   const categoryRef = useRef(category);
 
   const [tryVal, setTryVal] = useState("1000");
@@ -181,6 +228,46 @@ export default function PsnDealsPage() {
   useEffect(() => {
     categoryRef.current = category;
   }, [category]);
+
+  /**
+   * Browser-side rescue: fetch the deals page from the USER's network via a
+   * public CORS relay and parse it locally — the server never sees it, so
+   * datacenter IP bans don't matter.
+   */
+  const clientRescueDeals = useCallback(async (categoryId?: string) => {
+    setRescueState("busy");
+    try {
+      const target = categoryId && categoryId !== ALL_DEALS_CATEGORY.toLowerCase()
+        ? `https://store.playstation.com/en-tr/category/${categoryId}/1`
+        : `https://store.playstation.com/en-tr/category/${ALL_DEALS_CATEGORY.toLowerCase()}/1`;
+      const res = await fetch(
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`relay HTTP ${res.status}`);
+      const html = await res.text();
+      const games = parseDealsHubHtml(html);
+      if (games.length === 0) throw new Error("relay returned no parsable deals");
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              games,
+              sources: {
+                ...d.sources,
+                games: "live",
+                gamesProvider: "store.playstation.com via allorigins.win (browser)",
+              },
+              gamesFetchedAt: new Date().toISOString(),
+            }
+          : d,
+      );
+      setRescueState("ok");
+    } catch (err) {
+      console.error("[psn-deals] browser rescue failed:", err);
+      setRescueState("failed");
+    }
+  }, []);
 
   /** Fetch the deals grid for ONE campaign category (light payload). */
   const loadCategory = useCallback(async (id: string, force = false) => {
@@ -212,6 +299,11 @@ export default function PsnDealsPage() {
             }
           : d,
       );
+      if (json.source !== "live") {
+        void clientRescueDeals(id);
+      } else {
+        setRescueState("idle");
+      }
     } catch (err) {
       console.error("[psn-deals] campaign load failed:", err);
       setData((d) =>
@@ -219,10 +311,11 @@ export default function PsnDealsPage() {
           ? { ...d, games: [], sources: { ...d.sources, games: "unavailable" } }
           : d,
       );
+      void clientRescueDeals(id);
     } finally {
       setCategoryBusy(false);
     }
-  }, []);
+  }, [clientRescueDeals]);
 
   const fetchData = useCallback(
     async (force = false) => {
@@ -233,11 +326,19 @@ export default function PsnDealsPage() {
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as ApiPayload;
-        setData(json);
+        const payload = json.watchlistOk
+          ? json
+          : { ...json, watchlist: mergeLocalWatchlist(json.watchlist ?? []) };
+        setData(payload);
         setBdtVal((prev) =>
           prev !== "" ? prev : (1000 * json.fx.bdtPerTry).toFixed(2),
         );
         setLoadError(false);
+        if (json.sources?.games !== "live") {
+          void clientRescueDeals();
+        } else {
+          setRescueState("idle");
+        }
         // Full payload always carries the default All Deals grid — if the
         // user is viewing another campaign, re-overlay it (force-refresh
         // must refresh the visible category too, not snap it back).
@@ -253,7 +354,7 @@ export default function PsnDealsPage() {
         setRefreshing(false);
       }
     },
-    [loadCategory],
+    [loadCategory, clientRescueDeals],
   );
 
   useEffect(() => {
@@ -338,6 +439,25 @@ export default function PsnDealsPage() {
       setWatchBusy(true);
       try {
         const watched = isWatched(title);
+        if (!data.watchlistOk) {
+          // Browser-local watchlist (DB unreachable / DATABASE_URL not set)
+          const base = data.watchlist;
+          const next = watched
+            ? base.filter((t) => norm(t) !== norm(title))
+            : [...base, title];
+          writeLocalWatchlist(next);
+          setData((d) => (d ? { ...d, watchlist: next } : d));
+          if (!watched) {
+            void runLookup(title, true);
+          } else {
+            setLookups((m) => {
+              const n = { ...m };
+              delete n[title];
+              return n;
+            });
+          }
+          return;
+        }
         const res = await fetch(
           watched ? `/api/psn-deals?title=${encodeURIComponent(title)}` : "/api/psn-deals",
           watched
@@ -552,14 +672,22 @@ export default function PsnDealsPage() {
                   Live from {data.sources.gamesProvider ?? "store.playstation.com"} · fetched{" "}
                   {data.gamesFetchedAt ? new Date(data.gamesFetchedAt).toLocaleString() : "—"} · 30-min cache · Force Live Refresh to bypass
                 </p>
+              ) : rescueState === "busy" ? (
+                <p className="mb-3 inline-flex items-center gap-2 font-mono text-[9px] tracking-[0.14em] text-cyan/90 uppercase">
+                  <Loader2 size={11} className="animate-spin" /> Server blocked — fetching live deals straight from your browser via allorigins.win…
+                </p>
+              ) : rescueState === "failed" ? (
+                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-amber/80 uppercase">
+                  PSN deals unavailable — server blocked and the browser retry failed too · Force Live Refresh to retry
+                </p>
               ) : (
                 <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-amber/80 uppercase">
                   PSN Turkey deals unavailable — PS Store unreachable/blocked and all live aggregators failed · no fake games are shown · Force Live Refresh to retry
                 </p>
               )}
               {!data.watchlistOk && (
-                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-rose/80 uppercase">
-                  Watchlist unavailable — database unreachable or migration not run (npx drizzle-kit push)
+                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-cyan/80 uppercase">
+                  Watchlist stored in this browser only (DATABASE_URL not configured or DB unreachable) — cross-device sync needs the Neon database
                 </p>
               )}
 

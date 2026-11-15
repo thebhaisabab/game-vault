@@ -114,9 +114,8 @@ async function searchIgdb(query: string): Promise<GameSearchResult[]> {
     "fields name, cover.image_id, artworks.image_id, screenshots.image_id,",
     "platforms.name, first_release_date, summary, genres.name,",
     "involved_companies.company.name, involved_companies.developer,",
-    "involved_companies.publisher, total_rating, category;",
-    "where category = (0, 2, 4, 8, 9, 10, 11);",
-    "limit 24;",
+    "involved_companies.publisher, total_rating;",
+    "limit 25;",
   ].join(" ");
 
   const res = await fetch("https://api.igdb.com/v4/games", {
@@ -177,7 +176,7 @@ async function searchRawg(query: string): Promise<GameSearchResult[]> {
   if (!key) throw new Error("RAWG not configured");
   const url =
     `https://api.rawg.io/api/games?key=${encodeURIComponent(key)}` +
-    `&search=${encodeURIComponent(query)}&page_size=24&exclude_additions=true`;
+    `&search=${encodeURIComponent(query)}&page_size=25`;
   const res = await fetch(url, {
     signal: AbortSignal.timeout(9000),
     cache: "no-store",
@@ -234,7 +233,7 @@ async function searchSteam(query: string): Promise<GameSearchResult[]> {
   const data = (await res.json()) as { items?: SteamItem[] };
 
   return (data.items ?? [])
-    .slice(0, 24)
+    .slice(0, 25)
     .map((g) => {
       const platforms = ["PC"];
       if (g.platforms?.mac) platforms.push("Mac");

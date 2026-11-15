@@ -39,7 +39,16 @@ interface ApiPayload {
   fx: FxRates;
   watchlist: string[];
   watchlistOk: boolean;
-  sources: { games: string; fx: string; consoles: string };
+  sources: {
+    games: string;
+    fx: string;
+    consoles: string;
+    gamesProvider?: string | null;
+    consolesProvider?: string | null;
+    fxProvider?: string;
+  };
+  gamesFetchedAt?: string | null;
+  consolesFetchedAt?: string | null;
   gamesAsOf: string | null;
   consolesAsOf: string;
   lastLiveFetch: string | null;
@@ -50,6 +59,7 @@ interface ApiPayload {
 interface LiveLookup {
   status: "loading" | "found" | "not_found" | "error";
   deal?: PsnDealGame | null;
+  provider?: string | null;
 }
 
 type SortId = "discount" | "price" | "title";
@@ -225,6 +235,7 @@ export default function PsnDealsPage() {
       const json = (await res.json()) as {
         results?: PsnDealGame[];
         source?: string;
+        provider?: string | null;
       };
       if (!res.ok || json.source === "error") throw new Error("lookup failed");
       const results = json.results ?? [];
@@ -232,7 +243,7 @@ export default function PsnDealsPage() {
         results.find((r) => norm(r.title) === norm(title)) ?? results[0] ?? null;
       setLookups((m) => ({
         ...m,
-        [title]: { status: best ? "found" : "not_found", deal: best },
+        [title]: { status: best ? "found" : "not_found", deal: best, provider: json.provider ?? null },
       }));
     } catch (err) {
       console.error("[psn-deals] live lookup failed:", err);
@@ -364,8 +375,17 @@ export default function PsnDealsPage() {
   }, [data?.consoles]);
 
   const gameSourceLabel =
-    data?.sources.games === "live" ? "LIVE · PSN TR" : `SNAPSHOT · ${data?.gamesAsOf ?? "OFFLINE"}`;
-  const fxLabel = data?.fx.source === "live" ? "FX LIVE · OPEN.ER-API.COM" : "FX OFFLINE ESTIMATE";
+    data?.sources.games === "live"
+      ? `LIVE SOURCE: ${(data?.sources.gamesProvider ?? "store.playstation.com").toUpperCase()}`
+      : `SNAPSHOT · ${data?.gamesAsOf ?? "OFFLINE"}`;
+  const fxLabel =
+    data?.fx.source === "live"
+      ? `LIVE SOURCE: ${(data?.sources.fxProvider ?? "open.er-api.com").toUpperCase()}`
+      : "FX OFFLINE ESTIMATE";
+  const consoleSourceLabel =
+    liveConsoleCount > 0
+      ? `LIVE SOURCE: ${(data?.sources.consolesProvider ?? "playstation.com").toUpperCase()} · ${liveConsoleCount}/${data?.consoles.length}`
+      : `CURATED · ${data?.consolesAsOf}`;
 
   return (
     <main className="min-h-screen bg-void text-ink">
@@ -465,7 +485,12 @@ export default function PsnDealsPage() {
                 </div>
               </div>
 
-              {data.sources.games !== "live" && (
+              {data.sources.games === "live" ? (
+                <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-volt/80 uppercase">
+                  Live from {data.sources.gamesProvider ?? "store.playstation.com"} · fetched{" "}
+                  {data.gamesFetchedAt ? new Date(data.gamesFetchedAt).toLocaleString() : "—"} · 30-min cache · Force Live Refresh to bypass
+                </p>
+              ) : (
                 <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-amber/80 uppercase">
                   Offline snapshot · prices as of {data.gamesAsOf} · verify in-store before buying
                 </p>
@@ -716,6 +741,9 @@ export default function PsnDealsPage() {
                                 const d = lk.deal;
                                 return (
                                   <span className="flex items-center gap-1.5 font-mono text-[9px]">
+                                    {lk.provider && (
+                                      <span className="text-[7px] text-white/25 uppercase">via {lk.provider}</span>
+                                    )}
                                     {d.discountPct > 0 ? (
                                       <>
                                         <span className="rounded bg-amber/15 px-1 py-0.5 text-[8px] font-extrabold text-amber">
@@ -828,16 +856,21 @@ export default function PsnDealsPage() {
                   </h2>
                 </div>
                 <SourceBadge
-                  label={
-                    liveConsoleCount > 0
-                      ? `CONSOLES · ${liveConsoleCount}/${data.consoles.length} LIVE`
-                      : `CURATED · ${data.consolesAsOf}`
-                  }
+                  label={consoleSourceLabel}
                   tone={liveConsoleCount > 0 ? "live" : "curated"}
                 />
               </div>
-              <p className="mb-3 font-mono text-[9px] leading-relaxed tracking-[0.14em] text-amber/80 uppercase">
-                PS Direct regions (US / UK / EU) refresh live when reachable (30-min cache) · Japan & Turkey are a curated snapshot · all prices auto-converted to ৳ BDT at the live FX rate · confirm with retailer
+              <p className="mb-3 font-mono text-[9px] leading-relaxed tracking-[0.14em] text-white/40 uppercase">
+                {liveConsoleCount > 0 ? (
+                  <>
+                    Live from {data.sources.consolesProvider ?? "playstation.com"} buy-now pages · fetched{" "}
+                    {data.consolesFetchedAt ? new Date(data.consolesFetchedAt).toLocaleString() : "—"} · regions without live data keep the labelled{" "}
+                    {data.consolesAsOf} baseline ·{" "}
+                  </>
+                ) : (
+                  <>Curated {data.consolesAsOf} baseline (PS Store pages unreachable) · </>
+                )}
+                All prices auto-converted to ৳ BDT at the live FX rate · confirm with retailer
               </p>
 
               {bestBdtDeal && (

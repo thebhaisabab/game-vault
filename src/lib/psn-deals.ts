@@ -1,29 +1,42 @@
 /**
  * Server-side data layer for /psn-deals.
  *
- *   - FX: open.er-api.com (free, keyless, USD-based table) with a 30-minute
- *     Next.js data cache and an in-memory fallback, plus a labelled offline
- *     estimate if every rate source fails. One call yields BDT rates for
- *     USD, GBP, EUR, JPY and TRY.
- *   - PSN Turkey game deals: live via Sony's PlayStation Store. Two keyless
- *     strategies, in order:
- *       1. web.np.playstation.com GraphQL persisted query (opt-in: set
- *          PSN_TR_DEALS_HASH — the hash is undocumented/rotating, so it is
- *          read from the environment, never hardcoded). Requested with a
- *          browser UA, tr-TR Accept-Language and x-psn-store-locale-override.
- *       2. The public promotions page's embedded __NEXT_DATA__ payload,
- *          walked defensively for priced products.
- *     On any failure we return the bundled snapshot, clearly labelled.
- *   - PSN TR catalog search (watchlist lookup): same __NEXT_DATA__ walker
- *     against the public search page; returns full-price and discounted items.
- *   - Worldwide console board: best-effort live JSON-LD offers from
- *     PlayStation Direct regional storefronts (USA/UK/Europe); regions
- *     without PS Direct (JP, TR) and any failed fetch fall back to a curated
- *     row that is labelled per-row as CURATED. Quick-link buttons always
- *     work regardless of live results.
+ * Keyless live pipeline (designed for datacenter/Vercel egress — no GraphQL,
+ * which Sony's edge blocks from serverless IPs):
  *
- * All functions accept { force: true } (from ?refresh=1) to bypass every
- * cache. `revalidate` on the route and on fetches is 30 minutes elsewhere.
+ *   - FX: open.er-api.com (free, keyless, USD-based table) — one call yields
+ *     live BDT rates for USD, GBP, EUR, JPY and TRY. 30-minute Next.js data
+ *     cache + in-memory fallback; labelled offline estimate as last resort.
+ *   - PSN Turkey game deals (TRY / ₺):
+ *       1. PlayStation Store HTML pages —
+ *          https://store.playstation.com/en-tr/pages/deals
+ *          https://store.playstation.com/tr-tr/category/3f772501-f6f8-49b7-abac-874a88ca4897/1
+ *          fetched with full realistic Chrome desktop headers
+ *          (User-Agent, Accept text/html, Accept-Language tr-TR, Sec-Fetch-*)
+ *          and parsed from the embedded <script id="__NEXT_DATA__"> JSON
+ *          (Apollo/cache state walked defensively for priced products).
+ *       2. If the store blocks the datacenter IP (HTTP 403 / Akamai) or the
+ *          page shape changes, automatically fall back to live aggregators:
+ *          https://psprices.com/region-tr/discounts/?platform=PS5,PS4 then
+ *          https://psdeals.net/tr-store/discounts — parsed from their
+ *          embedded JSON when present, otherwise from raw HTML cards.
+ *       3. Only when every live endpoint fails: bundled labelled snapshot.
+ *   - Watchlist lookup (?query=): the same chain against
+ *          https://store.playstation.com/en-tr/search/<q>
+ *          (fallback https://psdeals.net/tr-store/search?search_query=<q>),
+ *          returning full-price and discounted items.
+ *   - Worldwide console prices: regional PlayStation hardware pages
+ *          https://www.playstation.com/{en-us|en-gb|de-de|ja-jp|tr-tr}/ps5/buy-now/
+ *          parsed via JSON-LD offers → embedded JSON walk → raw currency
+ *          regex scrape (per-currency sanity bounds, model-classified
+ *          Slim/Digital/Pro). PlayStation Direct JSON-LD is the fallback for
+ *          PS Direct regions (US/UK/DE). Anything that fails its sanity
+ *          checks keeps the Nov-2026 curated baseline, labelled per-row.
+ *          Every row is converted to ৳ BDT at the live FX rate.
+ *
+ * All fetches accept { force: true } (from ?refresh=1) to bypass caches.
+ * Every live path is labelled with its provider + exact fetch timestamp in
+ * the API payload; nothing is silently faked as live.
  */
 
 import {
@@ -41,14 +54,27 @@ import {
 
 export const REVALIDATE_SECONDS = 1800; // 30 minutes
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-const TR_HEADERS = {
-  "User-Agent": USER_AGENT,
-  "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-  "x-psn-store-locale-override": "tr-TR",
+/** Full realistic Chrome desktop navigation headers (tr-TR locale). */
+const DESKTOP_HEADERS = {
+  "User-Agent": CHROME_UA,
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+  "Cache-Control": "max-age=0",
 } as const;
+
+const desktopHeaders = (acceptLanguage: string) => ({
+  ...DESKTOP_HEADERS,
+  "Accept-Language": acceptLanguage,
+});
 
 export interface FetchOpts {
   force?: boolean;
@@ -59,15 +85,62 @@ const fetchInit = (force: boolean | undefined) =>
     ? ({ cache: "no-store" } as const)
     : ({ next: { revalidate: REVALIDATE_SECONDS } } as const);
 
-// Module-level bookkeeping (per server instance): timestamps of the last
-// successful LIVE fetches, exposed in the API payload so the UI can show them.
-const lastLive = { gamesAt: null as number | null, consolesAt: null as number | null, fxAt: null as number | null };
+// Module-level bookkeeping (per server instance): timestamps + provider
+// labels of the last successful LIVE fetches, exposed in the API payload so
+// the UI can show "LIVE SOURCE: <provider>" and the exact fetch time.
+const lastLive = {
+  gamesAt: null as number | null,
+  consolesAt: null as number | null,
+  fxAt: null as number | null,
+  gamesProvider: null as string | null,
+  consolesProvider: null as string | null,
+};
 
 export const liveMeta = () => ({
   lastLiveGamesAt: lastLive.gamesAt ? new Date(lastLive.gamesAt).toISOString() : null,
   lastLiveConsolesAt: lastLive.consolesAt ? new Date(lastLive.consolesAt).toISOString() : null,
   lastLiveFxAt: lastLive.fxAt ? new Date(lastLive.fxAt).toISOString() : null,
+  gamesProvider: lastLive.gamesProvider,
+  consolesProvider: lastLive.consolesProvider,
 });
+
+const decodeEntities = (s: string) =>
+  s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => {
+      const code = Number.parseInt(n, 10);
+      return Number.isFinite(code) ? String.fromCharCode(code) : "";
+    });
+
+/** Parse a localized number, disambiguating en/de thousand & decimal separators. */
+const parseLocalizedNumber = (raw: string): number | null => {
+  let s = raw.trim().replace(/[^\d.,-]/g, "");
+  if (!s) return null;
+  // 1.234.567,89 (de/tr) or 1,234,567.89 (en) with explicit thousand groups
+  if (/^\d{1,3}(\.\d{3})+(,\d{1,2})?$/.test(s)) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (/^\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(s)) {
+    s = s.replace(/,/g, "");
+  } else {
+    const lastDot = s.lastIndexOf(".");
+    const lastComma = s.lastIndexOf(",");
+    if (lastDot > lastComma) {
+      s = lastComma === -1 && s.length - lastDot - 1 <= 2 ? s : s.replace(/,/g, "");
+    } else if (lastComma > lastDot) {
+      s =
+        s.length - lastComma - 1 <= 2
+          ? s.replace(/\./g, "").replace(",", ".")
+          : s.replace(/,/g, "");
+    }
+  }
+  const n = Number.parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
 
 // ------------------------------------------------------------ FX rates ----
 
@@ -79,7 +152,7 @@ export async function getFxRates({ force }: FetchOpts = {}): Promise<FxRates> {
   }
   try {
     const res = await fetch("https://open.er-api.com/v6/latest/USD", {
-      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      headers: { Accept: "application/json", "User-Agent": CHROME_UA },
       signal: AbortSignal.timeout(8000),
       ...fetchInit(force),
     });
@@ -127,15 +200,13 @@ export async function getFxRates({ force }: FetchOpts = {}): Promise<FxRates> {
 
 // --------------------------------------------- PSN TR pricing utilities --
 
-const normTitle = (t: string) =>
-  t.toLowerCase().replace(/[^a-z0-9]+/g, "");
+const normTitle = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 const toNumber = (v: unknown): number | null => {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string") {
-    const cleaned = v.replace(/[^\d.,-]/g, "").replace(/\.(?=\d{3}\b)/g, "");
-    const n = Number.parseFloat(cleaned.replace(",", "."));
-    return Number.isFinite(n) ? n : null;
+    const n = parseLocalizedNumber(v);
+    return n;
   }
   return null;
 };
@@ -237,6 +308,16 @@ const pickImage = (rec: Record<string, unknown>): string | null => {
   return null;
 };
 
+const PLATFORM_RE = /ps\s*5/i;
+
+const platformOf = (probe: string): Array<"PS5" | "PS4"> => {
+  const hasPs5 = PLATFORM_RE.test(probe) || /playstation\s*5/i.test(probe);
+  const hasPs4 = /ps\s*4/i.test(probe) || /playstation\s*4/i.test(probe);
+  if (hasPs5 && hasPs4) return ["PS5", "PS4"];
+  if (hasPs4) return ["PS4"];
+  return ["PS5"];
+};
+
 const productToDeal = (
   rec: Record<string, unknown>,
   { requireDiscount }: { requireDiscount: boolean },
@@ -260,25 +341,22 @@ const productToDeal = (
   base = Math.round(base);
   sale = Math.round(sale);
   if (base <= 0 || sale <= 0 || sale > base) return null;
+  if (base > 200_000 || sale < 10) return null;
   const discountPct = Math.min(
     95,
     Math.max(0, Math.round((1 - sale / base) * 100)),
   );
   if (requireDiscount && discountPct < 1) return null;
   const probe = JSON.stringify(rec).slice(0, 3000);
-  const hasPs5 = /ps5|playstation\s*5/i.test(probe);
-  const hasPs4 = /ps4|playstation\s*4/i.test(probe);
-  const platforms: Array<"PS5" | "PS4"> =
-    hasPs5 && hasPs4 ? ["PS5", "PS4"] : hasPs4 ? ["PS4"] : ["PS5"];
   return {
     id: `psn-live-${djb2(title.toLowerCase())}`,
     title,
-    platforms,
+    platforms: platformOf(probe),
     basePrice: base,
     salePrice: sale,
     discountPct,
     coverUrl: pickImage(rec),
-    url: `https://store.playstation.com/tr-tr/search/${encodeURIComponent(title)}`,
+    url: `https://store.playstation.com/en-tr/search/${encodeURIComponent(title)}`,
   };
 };
 
@@ -298,150 +376,110 @@ const dedupeByTitle = (
   return out;
 };
 
-const parseNextData = (html: string): unknown => {
+const parseNextData = (html: string): unknown | null => {
   const match = html.match(
     /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
   );
-  if (!match?.[1]) throw new Error("page had no embedded __NEXT_DATA__");
-  return JSON.parse(match[1]);
+  if (!match?.[1]) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
 };
 
-// -------------------------------------- PSN Turkey live game deal sources --
-
-/**
- * Strategy 1: Sony's PlayStation Store GraphQL persisted query.
- * The sha256 hash is undocumented and rotates; it must be provided via the
- * PSN_TR_DEALS_HASH env var (copy it from DevTools → Network → the
- * categoryGridRetrieve request on store.playstation.com). No hash → skip.
- */
-async function fetchTurkeyDealsGraphql(
-  { force }: FetchOpts = {},
-): Promise<PsnDealGame[] | null> {
-  const hash = process.env.PSN_TR_DEALS_HASH;
-  if (!hash) return null;
-  const res = await fetch(
-    "https://web.np.playstation.com/api/graphql/v1/op",
-    {
-      method: "POST",
-      headers: {
-        ...TR_HEADERS,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        operationName: "categoryGridRetrieve",
-        variables: {},
-        extensions: {
-          persistedQuery: { version: 1, sha256Hash: hash },
-        },
-      }),
-      signal: AbortSignal.timeout(10000),
-      ...fetchInit(force),
-    },
-  );
-  if (!res.ok) throw new Error(`PSN GraphQL failed (${res.status})`);
-  const payload: unknown = await res.json();
-  const deals = dedupeByTitle(
+const walkerDeals = (
+  payload: unknown,
+  requireDiscount: boolean,
+  limit: number,
+): PsnDealGame[] =>
+  dedupeByTitle(
     [...walkJson(payload, { left: 250_000 })]
-      .map((node) => productToDeal(node, { requireDiscount: true }))
+      .map((node) => productToDeal(node, { requireDiscount }))
       .filter((d): d is PsnDealGame => d != null),
-    60,
+    limit,
   ).sort((a, b) => b.discountPct - a.discountPct);
-  return deals.length >= 4 ? deals : null;
-}
 
-/** Strategy 2: public promotions page, embedded __NEXT_DATA__ walker. */
-async function fetchTurkeyDealsHtml(
-  { force }: FetchOpts = {},
-): Promise<PsnDealGame[]> {
-  const res = await fetch("https://store.playstation.com/tr-tr/promotions", {
-    headers: { ...TR_HEADERS, Accept: "text/html,application/xhtml+xml" },
-    signal: AbortSignal.timeout(10000),
-    ...fetchInit(force),
-  });
-  if (!res.ok)
-    throw new Error(`PSN TR promotions page failed (${res.status})`);
-  const payload = parseNextData(await res.text());
-  const deals = dedupeByTitle(
-    [...walkJson(payload, { left: 250_000 })]
-      .map((node) => productToDeal(node, { requireDiscount: true }))
-      .filter((d): d is PsnDealGame => d != null),
-    60,
-  ).sort((a, b) => b.discountPct - a.discountPct);
-  if (deals.length < 4) {
-    throw new Error(`PSN page parsed only ${deals.length} products`);
+// --------------------------------------- Raw-card HTML parser (aggregators) --
+
+const TRY_TOKEN =
+  /(?:₺\s*([\d][\d.,]*))|(?:TL\s*([\d][\d.,]*))|(?:([\d][\d.,]*)\s*(?:₺|TL))/g;
+
+/** Sanity window for a PSN TR game price (₺). */
+const TRY_MIN = 10;
+const TRY_MAX = 200_000;
+
+const parseTryTokens = (chunk: string): number[] => {
+  const out: number[] = [];
+  for (const m of chunk.matchAll(TRY_TOKEN)) {
+    const raw = m[1] ?? m[2] ?? m[3];
+    if (!raw) continue;
+    const n = toNumber(raw);
+    if (n != null && n >= TRY_MIN && n <= TRY_MAX) out.push(Math.round(n));
   }
-  return deals;
-}
+  return out;
+};
 
-export interface TurkeyDealsResult {
-  games: PsnDealGame[];
-  source: "live" | "snapshot";
-  asOf: string | null;
-}
+const stripTags = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
-export async function getTurkeyDeals(
-  opts: FetchOpts = {},
-): Promise<TurkeyDealsResult> {
-  try {
-    const games = await fetchTurkeyDealsGraphql(opts);
-    if (games) {
-      lastLive.gamesAt = Date.now();
-      return { games, source: "live", asOf: null };
-    }
-  } catch (err) {
-    console.warn("[psn-deals] GraphQL deals source failed:", err);
+/** Extract game cards (anchor blocks) from raw HTML of an aggregator page. */
+const parseHtmlCards = (
+  html: string,
+  origin: string,
+  { requireDiscount }: { requireDiscount: boolean },
+): PsnDealGame[] => {
+  const clean = html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "");
+  const deals: PsnDealGame[] = [];
+  const anchorRe = /<a\s[^>]*href="([^"#][^"]*)"[^>]*>([\s\S]{20,4000}?)<\/a>/gi;
+  for (const match of clean.matchAll(anchorRe)) {
+    const [, href, inner] = match;
+    const prices = parseTryTokens(inner);
+    if (prices.length === 0) continue;
+    const sale = Math.min(...prices);
+    const base = Math.max(...prices);
+    if (base <= 0 || sale > base) continue;
+    const discountMatch = inner.match(/-?\s*(\d{1,2})\s*%/);
+    const discountPct = Math.min(
+      95,
+      Math.max(
+        0,
+        discountMatch
+          ? Number.parseInt(discountMatch[1], 10)
+          : Math.round((1 - sale / base) * 100),
+      ),
+    );
+    if (requireDiscount && discountPct < 1) continue;
+    const text = stripTags(inner);
+    const altMatch = inner.match(/alt="([^"]{3,140})"/i);
+    const headingMatch = inner.match(/<h[1-6][^>]*>([^<]{3,140})<\/h[1-6]>/i);
+    const title = decodeEntities(
+      (headingMatch?.[1] ?? altMatch?.[1] ?? "").trim(),
+    );
+    if (!title || title.length < 3) continue;
+    if (!/[a-z0-9]/i.test(title)) continue;
+    const imgMatch = inner.match(/<img[^>]+(?:data-src|src)="([^"]+)"/i);
+    const coverUrl = imgMatch?.[1]?.startsWith("http")
+      ? imgMatch[1]
+      : imgMatch?.[1]
+        ? `${origin}${imgMatch[1].startsWith("/") ? "" : "/"}${imgMatch[1]}`
+        : null;
+    const url = href.startsWith("http")
+      ? href
+      : `${origin}${href.startsWith("/") ? "" : "/"}${href}`;
+    deals.push({
+      id: `psn-live-${djb2(title.toLowerCase())}`,
+      title,
+      platforms: platformOf(text),
+      basePrice: base,
+      salePrice: sale,
+      discountPct,
+      coverUrl,
+      url,
+    });
   }
-  try {
-    const games = await fetchTurkeyDealsHtml(opts);
-    lastLive.gamesAt = Date.now();
-    return { games, source: "live", asOf: null };
-  } catch (err) {
-    console.error("[psn-deals] Live PSN TR fetch failed, using snapshot:", err);
-    return {
-      games: TURKEY_SNAPSHOT_GAMES.map(withDiscount),
-      source: "snapshot",
-      asOf: TURKEY_SNAPSHOT_AS_OF,
-    };
-  }
-}
-
-/**
- * Live catalog search on PSN Turkey — used by the watchlist to price any
- * arbitrary title. Returns full-price AND discounted items.
- */
-export async function searchPsnTrLive(
-  query: string,
-  opts: FetchOpts = {},
-): Promise<PsnDealGame[]> {
-  const q = query.trim().slice(0, 80);
-  if (q.length < 2) return [];
-  const res = await fetch(
-    `https://store.playstation.com/tr-tr/search/${encodeURIComponent(q)}`,
-    {
-      headers: { ...TR_HEADERS, Accept: "text/html,application/xhtml+xml" },
-      signal: AbortSignal.timeout(10000),
-      ...fetchInit(opts.force),
-    },
-  );
-  if (!res.ok) throw new Error(`PSN TR search failed (${res.status})`);
-  const payload = parseNextData(await res.text());
-  const needle = normTitle(q);
-  const deals = [...walkJson(payload, { left: 250_000 })]
-    .map((node) => productToDeal(node, { requireDiscount: false }))
-    .filter((d): d is PsnDealGame => d != null)
-    .filter((d) => normTitle(d.title).includes(needle));
-  return dedupeByTitle(deals, 10).sort((a, b) => b.discountPct - a.discountPct);
-}
-
-// ------------------------------------------- Worldwide console live lookup --
-
-const schemaOrgAvailability = (v: unknown): ConsoleDeal["availability"] => {
-  const s = String(v ?? "").toLowerCase();
-  if (s.includes("outofstock") || s.includes("soldout")) return "out_of_stock";
-  if (s.includes("limitedavailability")) return "limited";
-  if (s.includes("preorder") || s.includes("presale")) return "preorder";
-  return "in_stock";
+  return dedupeByTitle(deals, 60).sort((a, b) => b.discountPct - a.discountPct);
 };
 
 const extractJsonLdBlocks = (html: string): unknown[] => {
@@ -456,6 +494,213 @@ const extractJsonLdBlocks = (html: string): unknown[] => {
     }
   }
   return blocks;
+};
+
+/** Best-effort deals from an aggregator page: embedded JSON first, then raw HTML cards. */
+const aggregatorDeals = (
+  html: string,
+  origin: string,
+  { requireDiscount }: { requireDiscount: boolean },
+): PsnDealGame[] => {
+  const nextData = parseNextData(html);
+  if (nextData) {
+    const fromWalker = walkerDeals(nextData, requireDiscount, 60);
+    if (fromWalker.length >= 4) return fromWalker;
+  }
+  const fromLd: PsnDealGame[] = [];
+  for (const block of extractJsonLdBlocks(html)) {
+    fromLd.push(...walkerDeals(block, requireDiscount, 60));
+  }
+  const mergedLd = dedupeByTitle(fromLd, 60);
+  if (mergedLd.length >= 4) return mergedLd;
+  return parseHtmlCards(html, origin, { requireDiscount });
+};
+
+// -------------------------------------- PSN Turkey live game deal sources --
+
+const PSN_DEAL_PAGES = [
+  "https://store.playstation.com/en-tr/pages/deals",
+  "https://store.playstation.com/tr-tr/category/3f772501-f6f8-49b7-abac-874a88ca4897/1",
+] as const;
+const PSN_SEARCH_URL = (q: string) =>
+  `https://store.playstation.com/en-tr/search/${encodeURIComponent(q)}`;
+
+const AGGREGATORS = [
+  {
+    id: "psprices.com",
+    url: "https://psprices.com/region-tr/discounts/?platform=PS5,PS4",
+    origin: "https://psprices.com",
+  },
+  {
+    id: "psdeals.net",
+    url: "https://psdeals.net/tr-store/discounts",
+    origin: "https://psdeals.net",
+  },
+] as const;
+const PSDEALS_SEARCH_URL = (q: string) =>
+  `https://psdeals.net/tr-store/search?search_query=${encodeURIComponent(q)}`;
+
+export interface TurkeyDealsResult {
+  games: PsnDealGame[];
+  source: "live" | "snapshot";
+  /** Provider hostname when source === "live" (e.g. "store.playstation.com"). */
+  provider: string | null;
+  asOf: string | null;
+}
+
+/** Strategy 1: PlayStation Store HTML pages with full Chrome desktop headers. */
+async function fetchTurkeyDealsPsnPages(
+  { force }: FetchOpts = {},
+): Promise<PsnDealGame[] | null> {
+  const results = await Promise.allSettled(
+    PSN_DEAL_PAGES.map(async (url) => {
+      const res = await fetch(url, {
+        headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+        signal: AbortSignal.timeout(12000),
+        ...fetchInit(force),
+      });
+      if (!res.ok) {
+        throw new Error(`${url} → HTTP ${res.status} (possible Akamai/IP block)`);
+      }
+      const html = await res.text();
+      const nextData = parseNextData(html);
+      if (!nextData) throw new Error(`${url} had no parseable __NEXT_DATA__`);
+      return walkerDeals(nextData, true, 60);
+    }),
+  );
+  const merged: PsnDealGame[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") merged.push(...r.value);
+    else console.warn("[psn-deals] PSN deal page failed:", r.reason);
+  }
+  const games = dedupeByTitle(merged, 60).sort(
+    (a, b) => b.discountPct - a.discountPct,
+  );
+  return games.length >= 4 ? games : null;
+}
+
+/** Strategy 2: live aggregators (psprices.com → psdeals.net). */
+async function fetchTurkeyDealsAggregators(
+  { force }: FetchOpts = {},
+): Promise<{ games: PsnDealGame[]; provider: string } | null> {
+  for (const source of AGGREGATORS) {
+    try {
+      const res = await fetch(source.url, {
+        headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+        signal: AbortSignal.timeout(12000),
+        ...fetchInit(force),
+      });
+      if (!res.ok) throw new Error(`${source.id} → HTTP ${res.status}`);
+      const html = await res.text();
+      const games = aggregatorDeals(html, source.origin, {
+        requireDiscount: true,
+      });
+      if (games.length >= 4) return { games, provider: source.id };
+      console.warn(`[psn-deals] ${source.id} parsed only ${games.length} cards`);
+    } catch (err) {
+      console.warn(`[psn-deals] aggregator ${source.id} failed:`, err);
+    }
+  }
+  return null;
+}
+
+export async function getTurkeyDeals(
+  opts: FetchOpts = {},
+): Promise<TurkeyDealsResult> {
+  // 1) PlayStation Store pages
+  try {
+    const games = await fetchTurkeyDealsPsnPages(opts);
+    if (games) {
+      lastLive.gamesAt = Date.now();
+      lastLive.gamesProvider = "store.playstation.com";
+      return { games, source: "live", provider: "store.playstation.com", asOf: null };
+    }
+  } catch (err) {
+    console.error("[psn-deals] PlayStation Store deals fetch failed:", err);
+  }
+  // 2) Live aggregators
+  try {
+    const agg = await fetchTurkeyDealsAggregators(opts);
+    if (agg) {
+      lastLive.gamesAt = Date.now();
+      lastLive.gamesProvider = agg.provider;
+      return { games: agg.games, source: "live", provider: agg.provider, asOf: null };
+    }
+  } catch (err) {
+    console.error("[psn-deals] aggregator deals fetch failed:", err);
+  }
+  // 3) Labelled snapshot (only when EVERY live endpoint failed)
+  console.error("[psn-deals] All live PSN TR sources failed — serving labelled snapshot.");
+  return {
+    games: TURKEY_SNAPSHOT_GAMES.map(withDiscount),
+    source: "snapshot",
+    provider: null,
+    asOf: TURKEY_SNAPSHOT_AS_OF,
+  };
+}
+
+/**
+ * Live catalog lookup for one title — used by the watchlist to price it in
+ * TRY. Returns full-price AND discounted items, with the provider label.
+ */
+export interface CatalogSearchResult {
+  results: PsnDealGame[];
+  provider: string | null;
+}
+
+export async function searchPsnTrLive(
+  query: string,
+  opts: FetchOpts = {},
+): Promise<CatalogSearchResult> {
+  const q = query.trim().slice(0, 80);
+  const needle = normTitle(q);
+  if (q.length < 2) return { results: [], provider: null };
+
+  // 1) PlayStation Store search page
+  try {
+    const res = await fetch(PSN_SEARCH_URL(q), {
+      headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+      signal: AbortSignal.timeout(12000),
+      ...fetchInit(opts.force),
+    });
+    if (!res.ok) throw new Error(`PSN TR search → HTTP ${res.status}`);
+    const nextData = parseNextData(await res.text());
+    if (!nextData) throw new Error("PSN TR search page had no __NEXT_DATA__");
+    const results = dedupeByTitle(
+      walkerDeals(nextData, false, 25).filter((d) =>
+        normTitle(d.title).includes(needle),
+      ),
+      10,
+    ).sort((a, b) => b.discountPct - a.discountPct);
+    return { results, provider: "store.playstation.com" };
+  } catch (err) {
+    console.warn("[psn-deals] PSN TR search failed, trying psdeals.net:", err);
+  }
+
+  // 2) psdeals.net search fallback
+  const res = await fetch(PSDEALS_SEARCH_URL(q), {
+    headers: desktopHeaders("tr-TR,tr;q=0.9,en-US;q=0.8"),
+    signal: AbortSignal.timeout(12000),
+    ...fetchInit(opts.force),
+  });
+  if (!res.ok) throw new Error(`psdeals.net search → HTTP ${res.status}`);
+  const html = await res.text();
+  const results = aggregatorDeals(html, "https://psdeals.net", {
+    requireDiscount: false,
+  })
+    .filter((d) => normTitle(d.title).includes(needle))
+    .sort((a, b) => b.discountPct - a.discountPct);
+  return { results: results.slice(0, 10), provider: "psdeals.net" };
+}
+
+// ------------------------------------------- Worldwide console live lookup --
+
+const schemaOrgAvailability = (v: unknown): ConsoleDeal["availability"] => {
+  const s = String(v ?? "").toLowerCase();
+  if (s.includes("outofstock") || s.includes("soldout")) return "out_of_stock";
+  if (s.includes("limitedavailability")) return "limited";
+  if (s.includes("preorder") || s.includes("presale")) return "preorder";
+  return "in_stock";
 };
 
 function* findProducts(
@@ -476,11 +721,15 @@ function* findProducts(
     return;
   }
   for (const v of Object.values(rec)) yield* findProducts(v, depth + 1);
-};
+}
 
 const offersFrom = (
   product: Record<string, unknown>,
-): { price: number; currency: string; availability: ConsoleDeal["availability"] } | null => {
+): {
+  price: number;
+  currency: string;
+  availability: ConsoleDeal["availability"];
+} | null => {
   const offers = Array.isArray(product.offers) ? product.offers : [product.offers];
   for (const offer of offers) {
     if (!offer || typeof offer !== "object") continue;
@@ -498,84 +747,353 @@ const offersFrom = (
   return null;
 };
 
-/**
- * Live candidates: one PlayStation Direct product page per PS Direct region.
- * Japan and Turkey have no PS Direct storefront, so those rows are always the
- * curated snapshot. Any failure (slug drift, block, missing offer, wrong
- * currency) silently keeps the curated row for that region instead.
- */
-const PS_DIRECT_CANDIDATES: ReadonlyArray<{
-  rowId: string;
-  url: string;
-  currency: ConsoleCurrency;
-}> = [
-  { rowId: "con-us-3", url: "https://direct.playstation.com/en-us/p/playstation-5-pro", currency: "USD" },
-  { rowId: "con-uk-3", url: "https://direct.playstation.com/en-gb/p/playstation-5-pro", currency: "GBP" },
-  { rowId: "con-eu-3", url: "https://direct.playstation.com/en-de/p/playstation-5-pro", currency: "EUR" },
-];
+type ModelClass = "slim-disc" | "slim-digital" | "pro";
 
-async function fetchLiveConsoleRows(
-  { force }: FetchOpts = {},
-): Promise<Map<string, ConsoleDeal>> {
-  const out = new Map<string, ConsoleDeal>();
-  await Promise.allSettled(
-    PS_DIRECT_CANDIDATES.map(async ({ rowId, url, currency }) => {
-      const res = await fetch(url, {
-        headers: { ...TR_HEADERS, Accept: "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9" },
-        signal: AbortSignal.timeout(10000),
-        ...fetchInit(force),
+interface LiveOffer {
+  model: ModelClass;
+  price: number;
+  currency: ConsoleCurrency;
+  availability: ConsoleDeal["availability"] | null;
+  name: string | null;
+}
+
+const MODEL_ROW_ID: Record<string, Record<ModelClass, string>> = {
+  USA: { "slim-disc": "con-us-1", "slim-digital": "con-us-2", pro: "con-us-3" },
+  UK: { "slim-disc": "con-uk-1", "slim-digital": "con-uk-2", pro: "con-uk-3" },
+  Europe: { "slim-disc": "con-eu-1", "slim-digital": "con-eu-2", pro: "con-eu-3" },
+  Japan: { "slim-disc": "con-jp-1", "slim-digital": "con-jp-2", pro: "con-jp-3" },
+  Turkey: { "slim-disc": "con-tr-1", "slim-digital": "con-tr-2", pro: "con-tr-3" },
+};
+
+const SANITY: Record<ConsoleCurrency, { min: number; max: number }> = {
+  USD: { min: 250, max: 2500 },
+  GBP: { min: 250, max: 2000 },
+  EUR: { min: 250, max: 2500 },
+  JPY: { min: 40_000, max: 250_000 },
+  TRY: { min: 15_000, max: 250_000 },
+};
+
+const modelFromText = (text: string): ModelClass | null => {
+  if (!/ps\s*5|playstation\s*5/i.test(text)) return null;
+  // Model mentions appear in product names, prices come right after the name.
+  // When several are in scope, trust the one CLOSEST to the price (the last).
+  let best: { idx: number; model: ModelClass } | null = null;
+  for (const m of text.matchAll(/pro\b|digital/gi)) {
+    const model = /^pro/i.test(m[0]) ? "pro" : "slim-digital";
+    if (!best || (m.index ?? 0) > best.idx) best = { idx: m.index ?? 0, model };
+  }
+  return best?.model ?? "slim-disc"; // unqualified "PS5" ⇒ disc Slim
+};
+
+const CURRENCY_REGEX: Record<ConsoleCurrency, RegExp> = {
+  USD: /\$\s*([\d]{2,4}(?:[.,]\d{2})?)/g,
+  GBP: /£\s*([\d]{2,4}(?:[.,]\d{2})?)/g,
+  EUR: /(?:€\s*([\d]{2,4}(?:[.,]\d{2})?)|([\d]{2,4}(?:[.,]\d{2})?)\s*€)/g,
+  JPY: /(?:¥\s*([\d]{1,3}(?:[.,][\d]{3})+|[\d]{4,7})|([\d]{1,3}(?:[.,][\d]{3})+|[\d]{4,7})\s*円)/g,
+  TRY: /(?:₺\s*([\d]{1,3}(?:[.,][\d]{3})*(?:[.,]\d{1,2})?|[\d]{4,7})|([\d]{1,3}(?:[.,][\d]{3})*(?:[.,]\d{1,2})?|[\d]{4,7})\s*(?:₺|TL))/g,
+};
+
+/** Pass 1: JSON-LD Product nodes with offers. */
+const offersFromJsonLd = (
+  html: string,
+  currency: ConsoleCurrency,
+): LiveOffer[] => {
+  const out: LiveOffer[] = [];
+  for (const block of extractJsonLdBlocks(html)) {
+    for (const product of findProducts(block)) {
+      const name = pickString(product, ["name"]) ?? "";
+      const model = modelFromText(name);
+      if (!model) continue;
+      const offer = offersFrom(product);
+      if (!offer || offer.currency !== currency) continue;
+      if (!inBounds(offer.price, currency)) continue;
+      out.push({
+        model,
+        price: offer.price,
+        currency,
+        availability: offer.availability,
+        name,
       });
-      if (!res.ok) throw new Error(`PS Direct ${currency} failed (${res.status})`);
-      const html = await res.text();
-      for (const block of extractJsonLdBlocks(html)) {
-        for (const product of findProducts(block)) {
-          const name = pickString(product, ["name"]);
-          if (!name || !/ps5|playstation\s*5/i.test(name)) continue;
-          const offer = offersFrom(product);
-          if (!offer || offer.currency !== currency) continue;
-          out.set(rowId, {
-            id: rowId,
-            name,
-            note: "Live price from PlayStation Direct",
-            market: currency === "USD" ? "USA" : currency === "GBP" ? "UK" : "Europe",
-            currency,
-            price: offer.price,
-            originalPrice: null,
-            discountPct: null,
-            retailer: "PlayStation Direct",
-            availability: offer.availability,
-            url,
-          });
+    }
+  }
+  return out;
+};
+
+const inBounds = (price: number, currency: ConsoleCurrency) => {
+  const { min, max } = SANITY[currency];
+  return price >= min && price <= max;
+};
+
+/**
+ * Pass 2: embedded JSON (`__NEXT_DATA__` / application/json scripts).
+ * Collects objects that mention PS5 and carry a numeric price field.
+ */
+const offersFromEmbeddedJson = (
+  html: string,
+  currency: ConsoleCurrency,
+): LiveOffer[] => {
+  const out: LiveOffer[] = [];
+  const scriptRe = /<script[^>]*type="(?:application\/json|application\/ld\+json)"[^>]*>([\s\S]*?)<\/script>/g;
+  for (const m of html.matchAll(scriptRe)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(m[1]);
+    } catch {
+      continue;
+    }
+    const stack: unknown[] = [parsed];
+    let steps = 0;
+    while (stack.length && steps < 200_000) {
+      steps += 1;
+      const node = stack.pop();
+      if (node == null) continue;
+      if (Array.isArray(node)) {
+        stack.push(...node);
+        continue;
+      }
+      if (typeof node !== "object") continue;
+      const rec = node as Record<string, unknown>;
+      const nameText = pickString(rec, [
+        "name",
+        "title",
+        "productName",
+        "localName",
+        "label",
+      ]);
+      if (nameText && /ps\s*5|playstation\s*5/i.test(nameText)) {
+        const priceRaw = priceValue(rec, [
+          "price",
+          "currentPrice",
+          "salesPrice",
+          "offerPrice",
+          "unitPrice",
+          "discountedPrice",
+          "salePrice",
+        ]);
+        if (priceRaw != null) {
+          const model = modelFromText(nameText);
+          const maybeMinor = priceRaw >= 1_000_000 ? priceRaw / 100 : priceRaw;
+          if (model && inBounds(maybeMinor, currency)) {
+            out.push({
+              model,
+              price: currency === "JPY" || currency === "TRY" ? Math.round(maybeMinor) : Math.round(maybeMinor * 100) / 100,
+              currency,
+              availability: null,
+              name: nameText,
+            });
+          }
         }
       }
-    }),
-  );
-  if (out.size > 0) lastLive.consolesAt = Date.now();
+      stack.push(...Object.values(rec));
+    }
+  }
   return out;
+};
+
+/** Pass 3: raw-text currency regex with a ±260-char model-classification window. */
+const offersFromRawText = (
+  html: string,
+  currency: ConsoleCurrency,
+): LiveOffer[] => {
+  const text = stripTags(html.replace(/<script[\s\S]*?<\/script>/gi, " "));
+  const regex = new RegExp(CURRENCY_REGEX[currency].source, "g");
+  const byModel = new Map<ModelClass, { price: number; name: string }>();
+  for (const m of text.matchAll(regex)) {
+    const raw = m[1] ?? m[2];
+    if (!raw) continue;
+    const price = toNumber(raw);
+    if (price == null || !inBounds(price, currency)) continue;
+    // Window of text BEFORE the price: names precede prices on storefronts.
+    const windowText = text.slice(Math.max(0, (m.index ?? 0) - 280), m.index ?? 0);
+    const model = modelFromText(windowText);
+    if (!model) continue;
+    const snapped =
+      currency === "JPY" || currency === "TRY"
+        ? Math.round(price)
+        : Math.round(price * 100) / 100;
+    const prev = byModel.get(model);
+    if (!prev || snapped < prev.price) {
+      byModel.set(model, { price: snapped, name: windowText.slice(-80).trim() });
+    }
+  }
+  return [...byModel.entries()].map(([model, v]) => ({
+    model,
+    price: v.price,
+    currency,
+    availability: null,
+    name: null,
+  }));
+};
+
+interface BuyNowRegion {
+  market: EnrichedConsoleDeal["market"];
+  currency: ConsoleCurrency;
+  url: string;
+  acceptLanguage: string;
+  psDirectUrl: string | null;
+}
+
+const BUY_NOW_REGIONS: BuyNowRegion[] = [
+  {
+    market: "USA",
+    currency: "USD",
+    url: "https://www.playstation.com/en-us/ps5/buy-now/",
+    acceptLanguage: "en-US,en;q=0.9",
+    psDirectUrl: "https://direct.playstation.com/en-us/p/playstation-5-pro",
+  },
+  {
+    market: "UK",
+    currency: "GBP",
+    url: "https://www.playstation.com/en-gb/ps5/buy-now/",
+    acceptLanguage: "en-GB,en;q=0.9",
+    psDirectUrl: "https://direct.playstation.com/en-gb/p/playstation-5-pro",
+  },
+  {
+    market: "Europe",
+    currency: "EUR",
+    url: "https://www.playstation.com/de-de/ps5/buy-now/",
+    acceptLanguage: "de-DE,de;q=0.9,en;q=0.8",
+    psDirectUrl: "https://direct.playstation.com/en-de/p/playstation-5-pro",
+  },
+  {
+    market: "Japan",
+    currency: "JPY",
+    url: "https://www.playstation.com/ja-jp/ps5/buy-now/",
+    acceptLanguage: "ja-JP,ja;q=0.9,en;q=0.8",
+    psDirectUrl: null,
+  },
+  {
+    market: "Turkey",
+    currency: "TRY",
+    url: "https://www.playstation.com/tr-tr/ps5/buy-now/",
+    acceptLanguage: "tr-TR,tr;q=0.9,en-US;q=0.8",
+    psDirectUrl: null,
+  },
+];
+
+const bestOffer = (candidates: LiveOffer[]): LiveOffer | null => {
+  if (candidates.length === 0) return null;
+  return candidates.reduce((a, b) => (b.price < a.price ? b : a));
+};
+
+/** Fetch + parse one region's buy-now page; returns live offers by model. */
+async function fetchRegionOffers(
+  region: BuyNowRegion,
+  { force }: FetchOpts = {},
+): Promise<Map<ModelClass, LiveOffer> | null> {
+  const byModel = new Map<ModelClass, LiveOffer>();
+  try {
+    const res = await fetch(region.url, {
+      headers: desktopHeaders(region.acceptLanguage),
+      signal: AbortSignal.timeout(12000),
+      ...fetchInit(force),
+    });
+    if (!res.ok) throw new Error(`${region.market} buy-now → HTTP ${res.status}`);
+    const html = await res.text();
+    const p1 = offersFromJsonLd(html, region.currency);
+    const p2 = offersFromEmbeddedJson(html, region.currency);
+    const p3 = offersFromRawText(html, region.currency);
+    for (const model of ["slim-disc", "slim-digital", "pro"] as const) {
+      const chosen =
+        bestOffer(p1.filter((o) => o.model === model)) ??
+        bestOffer(p2.filter((o) => o.model === model)) ??
+        bestOffer(p3.filter((o) => o.model === model));
+      if (chosen) byModel.set(model, chosen);
+    }
+    if (byModel.size === 0) {
+      throw new Error(`${region.market} buy-now page yielded no usable prices`);
+    }
+    return byModel;
+  } catch (err) {
+    console.warn(`[psn-deals] ${region.market} buy-now fetch failed:`, err);
+    // PS Direct regions: try the product page JSON-LD for the Pro row.
+    if (region.psDirectUrl) {
+      try {
+        const res = await fetch(region.psDirectUrl, {
+          headers: desktopHeaders(region.acceptLanguage),
+          signal: AbortSignal.timeout(12000),
+          ...fetchInit(force),
+        });
+        if (res.ok) {
+          const html = await res.text();
+          for (const offer of offersFromJsonLd(html, region.currency)) {
+            if (offer.model === "pro" && inBounds(offer.price, region.currency)) {
+              byModel.set("pro", offer);
+              return byModel;
+            }
+          }
+        }
+      } catch (directErr) {
+        console.warn(
+          `[psn-deals] ${region.market} PS Direct fallback failed:`,
+          directErr,
+        );
+      }
+    }
+    return byModel.size > 0 ? byModel : null;
+  }
 }
 
 export interface ConsoleBoardResult {
   rows: EnrichedConsoleDeal[];
   liveCount: number;
+  /** Provider summary for the LIVE SOURCE badge (null when fully curated). */
+  provider: string | null;
 }
 
 export async function getConsoleBoard(
   fx: FxRates,
   opts: FetchOpts = {},
 ): Promise<ConsoleBoardResult> {
-  const liveRows = await fetchLiveConsoleRows(opts).catch((err) => {
-    console.error("[psn-deals] Console live lookup failed:", err);
-    return new Map<string, ConsoleDeal>();
-  });
+  const perRegion = await Promise.all(
+    BUY_NOW_REGIONS.map(async (region) => ({
+      region,
+      offers: await fetchRegionOffers(region, opts),
+    })),
+  );
 
-  const merged = CONSOLE_DEALS.map((row) => liveRows.get(row.id) ?? row);
+  const providers = new Set<string>();
+  const liveRowById = new Map<string, ConsoleDeal>();
+  for (const { region, offers } of perRegion) {
+    if (!offers || offers.size === 0) continue;
+    const rowIds = MODEL_ROW_ID[region.market];
+    let any = false;
+    for (const [model, offer] of offers) {
+      const rowId = rowIds[model];
+      const base = CONSOLE_DEALS.find((r) => r.id === rowId);
+      if (!base) continue;
+      liveRowById.set(rowId, {
+        ...base,
+        price: offer.price,
+        originalPrice: null,
+        discountPct: null,
+        name: base.name, // keep curated naming so rows stay comparable
+        note: `Live price · ${new URL(region.url).hostname} buy-now`,
+        retailer: "PlayStation Store",
+        availability: offer.availability ?? base.availability,
+        url: region.url,
+      });
+      any = true;
+    }
+    if (any) providers.add("playstation.com");
+  }
+
+  const merged = CONSOLE_DEALS.map((row) => liveRowById.get(row.id) ?? row);
   const rows: EnrichedConsoleDeal[] = merged.map((row) => {
     const rate = fx.bdtRates[row.currency as ConsoleCurrency];
     return {
       ...row,
       bdtPrice: rate && Number.isFinite(rate) ? row.price * rate : null,
-      source: liveRows.has(row.id) ? "live" : "curated",
+      source: liveRowById.has(row.id) ? "live" : "curated",
     };
   });
-  return { rows, liveCount: liveRows.size };
+  if (liveRowById.size > 0) {
+    lastLive.consolesAt = Date.now();
+    lastLive.consolesProvider = [...providers].join(" + ") || "playstation.com";
+  }
+  return {
+    rows,
+    liveCount: liveRowById.size,
+    provider: liveRowById.size > 0 ? lastLive.consolesProvider : null,
+  };
 }

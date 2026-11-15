@@ -1,8 +1,7 @@
-import { db } from "@/db";
-import { psnWatchlist } from "@/db/schema";
 import { asc, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { TURKEY_SNAPSHOT_AS_OF, CONSOLES_AS_OF } from "@/lib/psn-deals-data";
+
 import {
   getConsoleBoard,
   getFxRates,
@@ -15,13 +14,23 @@ import {
 // Live fetches use next.revalidate = 1800s (30 min) from the lib, so external
 // calls stay cached and rate-limit-safe while this handler stays dynamic
 // (watchlist DB reads must always be fresh).
+// ?refresh=1 bypasses every cache. ?query=<title> does a live catalog lookup.
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const MAX_TITLE = 120;
 
+async function getDb() {
+  const [{ db }, { psnWatchlist }] = await Promise.all([
+    import("@/db"),
+    import("@/db/schema"),
+  ]);
+  return { db, psnWatchlist };
+}
+
 async function readWatchlist(): Promise<{ titles: string[]; ok: boolean }> {
   try {
+    const { db, psnWatchlist } = await getDb();
     const rows = await db
       .select({ title: psnWatchlist.title })
       .from(psnWatchlist)
@@ -45,14 +54,19 @@ export async function GET(req: Request) {
   // ---- Live catalog lookup for a specific title (watchlist pricing) ----
   if (query) {
     if (query.length < 2) {
-      return NextResponse.json({ results: [], source: "none" });
+      return NextResponse.json({ results: [], source: "none", provider: null });
     }
     try {
-      const results = await searchPsnTrLive(query, { force });
-      return NextResponse.json({ results, source: "live" });
+      const { results, provider } = await searchPsnTrLive(query, { force });
+      return NextResponse.json(
+        { results, source: "live", provider },
+      );
     } catch (err) {
       console.error("[psn-deals] Watchlist live lookup failed:", err);
-      return NextResponse.json({ results: [], source: "error" }, { status: 200 });
+      return NextResponse.json(
+        { results: [], source: "error", provider: null },
+        { status: 200 },
+      );
     }
   }
 
@@ -80,10 +94,15 @@ export async function GET(req: Request) {
       games: turkey.source,
       consoles: board.liveCount > 0 ? "live" : "curated",
       fx: fx.source === "live" ? "live" : "fallback",
+      gamesProvider: turkey.provider,
+      consolesProvider: board.provider,
+      fxProvider: "open.er-api.com",
     },
     gamesAsOf: turkey.asOf ?? null,
     consolesAsOf: CONSOLES_AS_OF,
     snapshotAsOf: TURKEY_SNAPSHOT_AS_OF,
+    gamesFetchedAt: meta.lastLiveGamesAt,
+    consolesFetchedAt: meta.lastLiveConsolesAt,
     lastLiveFetch: liveStamps.length > 0 ? liveStamps[liveStamps.length - 1] : null,
     cacheMaxAgeSeconds: REVALIDATE_SECONDS,
     updatedAt: new Date().toISOString(),
@@ -108,6 +127,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
   try {
+    const { db, psnWatchlist } = await getDb();
     await db
       .insert(psnWatchlist)
       .values({ title })
@@ -142,6 +162,7 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
   try {
+    const { db, psnWatchlist } = await getDb();
     await db
       .delete(psnWatchlist)
       .where(sql`lower(${psnWatchlist.title}) = ${title.toLowerCase()}`);

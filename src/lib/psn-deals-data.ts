@@ -114,16 +114,19 @@ export function withDiscount(
   return { ...g, discountPct, url: ps(g.title) };
 }
 
-// ------------------------------------- Worldwide console board snapshot ---
+// --------------------------- Worldwide console board · Nov 2026 baseline ---
+// Fallback prices captured Nov 2026 — labelled CURATED in the UI. Live fetches
+// from playstation.com regional buy-now pages replace these per-row when possible.
+// TRY/JPY street prices in particular drift weekly; always verify with retailer.
 
 export const CONSOLES_AS_OF = "Nov 2026";
 
 export const CONSOLE_DEALS: ConsoleDeal[] = [
   // USA (USD)
-  { id: "con-us-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "USA", currency: "USD", price: 499.99, originalPrice: 549.99, discountPct: 9, retailer: "Walmart", availability: "in_stock", url: "https://www.walmart.com/search?q=playstation+5" },
-  { id: "con-us-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "USA", currency: "USD", price: 449.99, originalPrice: 499.99, discountPct: 10, retailer: "Best Buy", availability: "limited", url: "https://www.bestbuy.com/site/searchpage.jsp?st=playstation%205" },
+  { id: "con-us-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "USA", currency: "USD", price: 549.99, originalPrice: null, discountPct: null, retailer: "Walmart", availability: "in_stock", url: "https://www.walmart.com/search?q=playstation+5" },
+  { id: "con-us-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "USA", currency: "USD", price: 499.99, originalPrice: null, discountPct: null, retailer: "Best Buy", availability: "in_stock", url: "https://www.bestbuy.com/site/searchpage.jsp?st=playstation%205" },
   { id: "con-us-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "USA", currency: "USD", price: 749.99, originalPrice: null, discountPct: null, retailer: "Amazon", availability: "in_stock", url: "https://www.amazon.com/s?k=playstation+5+pro" },
-  { id: "con-us-4", name: "PS5 Slim + Spider-Man 2 Bundle", note: "Console + Spider-Man 2 + DualSense voucher", market: "USA", currency: "USD", price: 529.99, originalPrice: 589.99, discountPct: 10, retailer: "Walmart", availability: "limited", url: "https://www.walmart.com/search?q=ps5+bundle" },
+  { id: "con-us-4", name: "PS5 Slim + Spider-Man 2 Bundle", note: "Console + Spider-Man 2 + DualSense voucher", market: "USA", currency: "USD", price: 599.99, originalPrice: null, discountPct: null, retailer: "Walmart", availability: "limited", url: "https://www.walmart.com/search?q=ps5+bundle" },
   // UK (GBP)
   { id: "con-uk-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "UK", currency: "GBP", price: 479.99, originalPrice: null, discountPct: null, retailer: "Amazon UK", availability: "in_stock", url: "https://www.amazon.co.uk/s?k=ps5" },
   { id: "con-uk-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "UK", currency: "GBP", price: 429.99, originalPrice: 479.99, discountPct: 10, retailer: "Currys", availability: "in_stock", url: "https://www.currys.co.uk/search?q=ps5" },
@@ -135,14 +138,14 @@ export const CONSOLE_DEALS: ConsoleDeal[] = [
   { id: "con-eu-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "Europe", currency: "EUR", price: 799.99, originalPrice: null, discountPct: null, retailer: "Amazon.de", availability: "in_stock", url: "https://www.amazon.de/s?k=ps5+pro" },
   { id: "con-eu-4", name: "PS5 Slim + Astro Bot Bundle", note: "Console + Astro Bot + 3 months PS Plus Essential", market: "Europe", currency: "EUR", price: 519.99, originalPrice: 549.99, discountPct: 5, retailer: "MediaMarkt", availability: "limited", url: "https://www.mediamarkt.de/de/search.html?query=ps5+bundle" },
   // Japan (JPY)
-  { id: "con-jp-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "Japan", currency: "JPY", price: 88980, originalPrice: 93980, discountPct: 5, retailer: "Yodobashi", availability: "in_stock", url: "https://www.yodobashi.com/?word=playstation+5" },
-  { id: "con-jp-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "Japan", currency: "JPY", price: 79980, originalPrice: null, discountPct: null, retailer: "Amazon Japan", availability: "limited", url: "https://www.amazon.co.jp/s?k=ps5" },
-  { id: "con-jp-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "Japan", currency: "JPY", price: 119980, originalPrice: null, discountPct: null, retailer: "Yodobashi", availability: "in_stock", url: "https://www.yodobashi.com/?word=ps5+pro" },
+  { id: "con-jp-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "Japan", currency: "JPY", price: 92980, originalPrice: null, discountPct: null, retailer: "Yodobashi", availability: "in_stock", url: "https://www.yodobashi.com/?word=playstation+5" },
+  { id: "con-jp-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "Japan", currency: "JPY", price: 84980, originalPrice: null, discountPct: null, retailer: "Amazon Japan", availability: "limited", url: "https://www.amazon.co.jp/s?k=ps5" },
+  { id: "con-jp-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "Japan", currency: "JPY", price: 122980, originalPrice: null, discountPct: null, retailer: "Yodobashi", availability: "in_stock", url: "https://www.yodobashi.com/?word=ps5+pro" },
   // Turkey (TRY)
-  { id: "con-tr-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "Turkey", currency: "TRY", price: 37999, originalPrice: 42999, discountPct: 12, retailer: "Trendyol", availability: "in_stock", url: "https://www.trendyol.com/sr?q=playstation%205" },
-  { id: "con-tr-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "Turkey", currency: "TRY", price: 32999, originalPrice: null, discountPct: null, retailer: "Hepsiburada", availability: "limited", url: "https://www.hepsiburada.com/ara?q=playstation%205" },
-  { id: "con-tr-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "Turkey", currency: "TRY", price: 59999, originalPrice: null, discountPct: null, retailer: "Trendyol", availability: "out_of_stock", url: "https://www.trendyol.com/sr?q=ps5%20pro" },
-  { id: "con-tr-4", name: "PS5 Slim + Astro Bot Bundle", note: "Console + Astro Bot + DualSense edge voucher", market: "Turkey", currency: "TRY", price: 44999, originalPrice: 47999, discountPct: 6, retailer: "Trendyol", availability: "limited", url: "https://www.trendyol.com/sr?q=ps5%20bundle" },
+  { id: "con-tr-1", name: "PlayStation 5 Slim (1TB, Disc)", note: null, market: "Turkey", currency: "TRY", price: 45999, originalPrice: null, discountPct: null, retailer: "Trendyol", availability: "in_stock", url: "https://www.trendyol.com/sr?q=playstation%205" },
+  { id: "con-tr-2", name: "PlayStation 5 Slim Digital (1TB)", note: null, market: "Turkey", currency: "TRY", price: 39999, originalPrice: null, discountPct: null, retailer: "Hepsiburada", availability: "limited", url: "https://www.hepsiburada.com/ara?q=playstation%205" },
+  { id: "con-tr-3", name: "PlayStation 5 Pro (2TB)", note: null, market: "Turkey", currency: "TRY", price: 72999, originalPrice: null, discountPct: null, retailer: "Trendyol", availability: "out_of_stock", url: "https://www.trendyol.com/sr?q=ps5%20pro" },
+  { id: "con-tr-4", name: "PS5 Slim + Astro Bot Bundle", note: "Console + Astro Bot + DualSense edge voucher", market: "Turkey", currency: "TRY", price: 54999, originalPrice: null, discountPct: null, retailer: "Trendyol", availability: "limited", url: "https://www.trendyol.com/sr?q=ps5%20bundle" },
 ];
 
 export const MARKET_ORDER: ConsoleMarket[] = [

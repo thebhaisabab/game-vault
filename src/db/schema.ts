@@ -2,7 +2,6 @@ import {
   boolean,
   index,
   integer,
-  jsonb,
   pgTable,
   serial,
   text,
@@ -50,28 +49,3 @@ export const libraryGames = pgTable(
 
 export type LibraryGame = typeof libraryGames.$inferSelect;
 export type NewLibraryGame = typeof libraryGames.$inferInsert;
-
-// ---- PSN Turkey watchlist (game titles to track against TR store sales) ----
-export const psnWatchlist = pgTable("psn_watchlist", {
-  id: serial("id").primaryKey(),
-  title: text("title").notNull().unique(),
-  createdAt: timestamp("created_at", { mode: "string" })
-    .notNull()
-    .defaultNow(),
-});
-
-export type PsnWatchlistEntry = typeof psnWatchlist.$inferSelect;
-
-// ---- PSN deals persistent cache -------------------------------------------
-// Written on every successful live fetch (GraphQL or manual "Sync from PSN
-// Tab" import) so all devices are served the last-known-good deals instantly.
-export const psnDealsCache = pgTable("psn_deals_cache", {
-  cacheKey: text("cache_key").primaryKey(),
-  payload: jsonb("payload").notNull(),
-  provider: text("provider"),
-  fetchedAt: timestamp("fetched_at", { mode: "string", withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-export type PsnDealsCacheRow = typeof psnDealsCache.$inferSelect;

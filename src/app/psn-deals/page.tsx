@@ -27,21 +27,29 @@ import {
   type FxRates,
   type PsnAvailability,
   type PsnDealGame,
-  type ConsoleDeal,
+  type EnrichedConsoleDeal,
 } from "@/lib/psn-deals-data";
 
 // ------------------------------------------------------------------ types --
 
 interface ApiPayload {
   games: PsnDealGame[];
-  consoles: ConsoleDeal[];
+  consoles: EnrichedConsoleDeal[];
+  consoleLiveShare: number;
   fx: FxRates;
   watchlist: string[];
   watchlistOk: boolean;
   sources: { games: string; fx: string; consoles: string };
   gamesAsOf: string | null;
   consolesAsOf: string;
+  lastLiveFetch: string | null;
+  cacheMaxAgeSeconds: number;
   updatedAt: string;
+}
+
+interface LiveLookup {
+  status: "loading" | "found" | "not_found" | "error";
+  deal?: PsnDealGame | null;
 }
 
 type SortId = "discount" | "price" | "title";
@@ -149,13 +157,17 @@ export default function PsnDealsPage() {
   const [watchInput, setWatchInput] = useState("");
   const [watchError, setWatchError] = useState<string | null>(null);
   const [watchBusy, setWatchBusy] = useState(false);
+  const [lookups, setLookups] = useState<Record<string, LiveLookup>>({});
 
   const [tryVal, setTryVal] = useState("1000");
   const [bdtVal, setBdtVal] = useState("");
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (force = false) => {
     try {
-      const res = await fetch("/api/psn-deals", { cache: "no-store" });
+      const res = await fetch(
+        force ? "/api/psn-deals?refresh=1" : "/api/psn-deals",
+        { cache: "no-store" },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = (await res.json()) as ApiPayload;
       setData(json);
@@ -203,6 +215,49 @@ export default function PsnDealsPage() {
     return map;
   }, [data?.games]);
 
+  const runLookup = useCallback(async (title: string, force = false) => {
+    setLookups((m) => ({ ...m, [title]: { status: "loading" } }));
+    try {
+      const res = await fetch(
+        `/api/psn-deals?query=${encodeURIComponent(title)}${force ? "&refresh=1" : ""}`,
+        { cache: "no-store" },
+      );
+      const json = (await res.json()) as {
+        results?: PsnDealGame[];
+        source?: string;
+      };
+      if (!res.ok || json.source === "error") throw new Error("lookup failed");
+      const results = json.results ?? [];
+      const best =
+        results.find((r) => norm(r.title) === norm(title)) ?? results[0] ?? null;
+      setLookups((m) => ({
+        ...m,
+        [title]: { status: best ? "found" : "not_found", deal: best },
+      }));
+    } catch (err) {
+      console.error("[psn-deals] live lookup failed:", err);
+      setLookups((m) => ({ ...m, [title]: { status: "error" } }));
+    }
+  }, []);
+
+  const scanWatchlist = useCallback(
+    (titles: string[], force = false) => {
+      for (const t of titles.slice(0, 12)) {
+        void runLookup(t, force);
+      }
+    },
+    [runLookup],
+  );
+
+  // Auto-check the watchlist against the live PSN TR catalog after load.
+  useEffect(() => {
+    const titles = watchlist;
+    if (titles.length === 0) return;
+    const t = window.setTimeout(() => scanWatchlist(titles, false), 0);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchlist.length]);
+
   const toggleWatch = useCallback(
     async (title: string) => {
       if (!data) return;
@@ -223,6 +278,15 @@ export default function PsnDealsPage() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as { watchlist: string[] };
         setData((d) => (d ? { ...d, watchlist: json.watchlist, watchlistOk: true } : d));
+        if (!watched) {
+          void runLookup(title, true);
+        } else {
+          setLookups((m) => {
+            const next = { ...m };
+            delete next[title];
+            return next;
+          });
+        }
       } catch (err) {
         console.error("[psn-deals] watchlist toggle failed:", err);
         setWatchError("Watchlist sync failed — is the database reachable?");
@@ -230,7 +294,7 @@ export default function PsnDealsPage() {
         setWatchBusy(false);
       }
     },
-    [data, isWatched],
+    [data, isWatched, runLookup],
   );
 
   const addWatchFromInput = useCallback(async () => {
@@ -272,6 +336,21 @@ export default function PsnDealsPage() {
     [watchlistEntries],
   );
 
+  const bestBdtDeal = useMemo(() => {
+    const rows = (data?.consoles ?? []).filter(
+      (c) => c.bdtPrice != null && c.availability !== "out_of_stock",
+    );
+    if (rows.length === 0) return null;
+    return rows.reduce((a, b) =>
+      (a.bdtPrice ?? Infinity) <= (b.bdtPrice ?? Infinity) ? a : b,
+    );
+  }, [data?.consoles]);
+
+  const liveConsoleCount = useMemo(
+    () => (data?.consoles ?? []).filter((c) => c.source === "live").length,
+    [data?.consoles],
+  );
+
   const filteredConsoles = useMemo(() => {
     const rows = data?.consoles ?? [];
     return market === "All" ? rows : rows.filter((c) => c.market === market);
@@ -304,19 +383,27 @@ export default function PsnDealsPage() {
             Vault
           </Link>
           <div className="flex items-center gap-2 sm:gap-3">
-            {data && (
-              <span className="hidden font-mono text-[9px] tracking-[0.18em] text-white/35 uppercase sm:inline">
-                Updated {new Date(data.updatedAt).toLocaleTimeString()}
+            {data?.lastLiveFetch && (
+              <span className="hidden font-mono text-[9px] tracking-[0.18em] text-volt/70 uppercase md:inline">
+                Last live fetch · {new Date(data.lastLiveFetch).toLocaleString()}
               </span>
             )}
             <button
               onClick={() => { setRefreshing(true); fetchData(); }}
               disabled={refreshing}
               aria-label="Refresh prices"
-              title="Refresh prices"
+              title="Refresh (cached ≤30 min)"
               className="grid h-9 w-9 place-items-center rounded-lg border border-line bg-panel text-white/70 transition-all hover:border-volt/50 hover:text-volt disabled:opacity-50"
             >
               <RefreshCw size={15} strokeWidth={2.2} className={refreshing ? "animate-spin" : ""} />
+            </button>
+            <button
+              onClick={() => { setRefreshing(true); fetchData(true); }}
+              disabled={refreshing}
+              className="h-9 rounded-lg border border-volt/50 bg-volt/10 px-3 font-mono text-[9px] font-extrabold tracking-[0.18em] whitespace-nowrap text-volt uppercase transition-all hover:bg-volt hover:text-void disabled:opacity-50"
+              title="Bypass cache and hit the live stores now"
+            >
+              Force live refresh
             </button>
           </div>
         </div>
@@ -531,9 +618,19 @@ export default function PsnDealsPage() {
                       <h3 className="font-mono text-[10px] font-bold tracking-[0.25em] text-white/70 uppercase">
                         Custom Watchlist
                       </h3>
-                      <span className="rounded-full border border-volt/40 bg-volt/10 px-2 py-0.5 font-mono text-[9px] font-bold text-volt">
-                        {watchlist.length}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => scanWatchlist(watchlist, true)}
+                          title="Re-check live PSN TR prices for everything on the list"
+                          aria-label="Live re-check of watchlist prices"
+                          className="grid h-6 w-6 place-items-center rounded-md border border-line text-white/45 transition-colors hover:border-volt/50 hover:text-volt"
+                        >
+                          <RefreshCw size={11} strokeWidth={2.4} />
+                        </button>
+                        <span className="rounded-full border border-volt/40 bg-volt/10 px-2 py-0.5 font-mono text-[9px] font-bold text-volt">
+                          {watchlist.length}
+                        </span>
+                      </div>
                     </div>
                     <form
                       onSubmit={(e) => {
@@ -602,9 +699,42 @@ export default function PsnDealsPage() {
                                 </>
                               ) : (
                                 <span className="font-mono text-[8px] tracking-[0.18em] text-white/35 uppercase">
-                                  Not on sale in TR right now
+                                  Not in active TR deals list
                                 </span>
                               )}
+                            </div>
+                            <div className="mt-1 flex items-center gap-2 border-t border-white/5 pt-1.5">
+                              <span className="font-mono text-[7px] tracking-[0.2em] text-white/30 uppercase">Live PSN TR:</span>
+                              {(() => {
+                                const lk = lookups[title];
+                                if (!lk || lk.status === "loading")
+                                  return <span className="font-mono text-[8px] text-white/35 uppercase">checking…</span>;
+                                if (lk.status === "error")
+                                  return <span className="font-mono text-[8px] text-rose/80 uppercase">lookup failed</span>;
+                                if (lk.status === "not_found" || !lk.deal)
+                                  return <span className="font-mono text-[8px] text-white/35 uppercase">not found in catalog</span>;
+                                const d = lk.deal;
+                                return (
+                                  <span className="flex items-center gap-1.5 font-mono text-[9px]">
+                                    {d.discountPct > 0 ? (
+                                      <>
+                                        <span className="rounded bg-amber/15 px-1 py-0.5 text-[8px] font-extrabold text-amber">
+                                          LIVE −{d.discountPct}%
+                                        </span>
+                                        <span className="font-bold text-volt">{formatTry(d.salePrice)}</span>
+                                        <span className="text-[8px] text-white/35 line-through">{formatTry(d.basePrice)}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span className="text-[8px] font-extrabold tracking-[0.15em] text-white/45 uppercase">
+                                          Full price
+                                        </span>
+                                        <span className="font-bold text-white/80">{formatTry(d.basePrice)}</span>
+                                      </>
+                                    )}
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </li>
                         ))}
@@ -697,11 +827,35 @@ export default function PsnDealsPage() {
                     PS5 hardware deals, <span className="text-volt">five markets</span>
                   </h2>
                 </div>
-                <SourceBadge label={`CURATED · ${data.consolesAsOf}`} tone="curated" />
+                <SourceBadge
+                  label={
+                    liveConsoleCount > 0
+                      ? `CONSOLES · ${liveConsoleCount}/${data.consoles.length} LIVE`
+                      : `CURATED · ${data.consolesAsOf}`
+                  }
+                  tone={liveConsoleCount > 0 ? "live" : "curated"}
+                />
               </div>
-              <p className="mb-3 font-mono text-[9px] tracking-[0.14em] text-amber/80 uppercase">
-                Curated worldwide price board · verified {data.consolesAsOf} · prices & stock move daily — confirm with retailer
+              <p className="mb-3 font-mono text-[9px] leading-relaxed tracking-[0.14em] text-amber/80 uppercase">
+                PS Direct regions (US / UK / EU) refresh live when reachable (30-min cache) · Japan & Turkey are a curated snapshot · all prices auto-converted to ৳ BDT at the live FX rate · confirm with retailer
               </p>
+
+              {bestBdtDeal && (
+                <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-volt/40 bg-volt/[0.07] px-4 py-2.5">
+                  <span className="font-mono text-[9px] font-extrabold tracking-[0.25em] text-volt uppercase">
+                    Best PS5 price in Taka
+                  </span>
+                  <span className="font-mono text-[11px] font-bold text-white">
+                    {bestBdtDeal.market} · {bestBdtDeal.name}
+                  </span>
+                  <span className="font-mono text-sm font-extrabold text-volt">
+                    ৳{Math.round(bestBdtDeal.bdtPrice ?? 0).toLocaleString("en-US")}
+                  </span>
+                  <span className="font-mono text-[8px] tracking-[0.16em] text-white/45 uppercase">
+                    {bestBdtDeal.retailer} · {bestBdtDeal.source} · converted @ live FX
+                  </span>
+                </div>
+              )}
 
               {/* market filter */}
               <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -729,10 +883,10 @@ export default function PsnDealsPage() {
 
               {/* console board */}
               <div className="overflow-x-auto rounded-2xl border border-line">
-                <table className="w-full min-w-[920px] border-collapse text-left">
+                <table className="w-full min-w-[1060px] border-collapse text-left">
                   <thead>
                     <tr className="bg-panel-2">
-                      {["Console / Bundle", "Market", "Price", "Was", "Stock", "Retailer", ""].map((h) => (
+                      {["Console / Bundle", "Market", "Price", "Was", "≈ BDT", "Stock", "Retailer", ""].map((h) => (
                         <th
                           key={h}
                           className="px-4 py-3 font-mono text-[9px] font-bold tracking-[0.22em] text-white/40 uppercase"
@@ -780,6 +934,22 @@ export default function PsnDealsPage() {
                           <td className="px-4 py-3 font-mono text-[10px] whitespace-nowrap text-white/35 line-through">
                             {c.originalPrice != null ? formatConsolePrice({ ...c, price: c.originalPrice }) : "—"}
                           </td>
+                          <td className="px-4 py-3 align-middle font-mono text-[11px] whitespace-nowrap">
+                            {c.bdtPrice != null ? (
+                              <span className="font-bold text-cyan">
+                                ≈ ৳{Math.round(c.bdtPrice).toLocaleString("en-US")}
+                              </span>
+                            ) : (
+                              <span className="text-white/35">—</span>
+                            )}
+                            <span
+                              className={`mt-0.5 block text-[7px] font-extrabold tracking-[0.18em] uppercase ${
+                                c.source === "live" ? "text-volt" : "text-amber"
+                              }`}
+                            >
+                              {c.source === "live" ? "● Live" : "○ Curated"}
+                            </span>
+                          </td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[8px] font-extrabold tracking-[0.18em] whitespace-nowrap uppercase ${avail.cls}`}>
                               <span className={`h-1.5 w-1.5 rounded-full ${avail.dot}`} />
@@ -794,7 +964,8 @@ export default function PsnDealsPage() {
                               href={c.url}
                               target="_blank"
                               rel="noreferrer"
-                              aria-label={`Open retailer for ${c.name}`}
+                              aria-label={`Check live price for ${c.name} at ${c.retailer}`}
+                              title={`Check live price at ${c.retailer}`}
                               className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-line text-white/50 transition-all hover:border-volt/60 hover:text-volt"
                             >
                               <ExternalLink size={13} />

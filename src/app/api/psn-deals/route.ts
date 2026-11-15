@@ -2,12 +2,19 @@ import { db } from "@/db";
 import { psnWatchlist } from "@/db/schema";
 import { asc, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
+import { TURKEY_SNAPSHOT_AS_OF, CONSOLES_AS_OF } from "@/lib/psn-deals-data";
 import {
-  CONSOLES_AS_OF,
-  TURKEY_SNAPSHOT_AS_OF,
-} from "@/lib/psn-deals-data";
-import { getConsoleDeals, getFxRates, getTurkeyDeals } from "@/lib/psn-deals";
+  getConsoleBoard,
+  getFxRates,
+  getTurkeyDeals,
+  liveMeta,
+  searchPsnTrLive,
+  REVALIDATE_SECONDS,
+} from "@/lib/psn-deals";
 
+// Live fetches use next.revalidate = 1800s (30 min) from the lib, so external
+// calls stay cached and rate-limit-safe while this handler stays dynamic
+// (watchlist DB reads must always be fresh).
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -30,24 +37,55 @@ async function readWatchlist(): Promise<{ titles: string[]; ok: boolean }> {
   }
 }
 
-export async function GET() {
-  const [fx, turkey] = await Promise.all([getFxRates(), getTurkeyDeals()]);
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const force = searchParams.get("refresh") === "1";
+  const query = searchParams.get("query")?.trim() ?? "";
+
+  // ---- Live catalog lookup for a specific title (watchlist pricing) ----
+  if (query) {
+    if (query.length < 2) {
+      return NextResponse.json({ results: [], source: "none" });
+    }
+    try {
+      const results = await searchPsnTrLive(query, { force });
+      return NextResponse.json({ results, source: "live" });
+    } catch (err) {
+      console.error("[psn-deals] Watchlist live lookup failed:", err);
+      return NextResponse.json({ results: [], source: "error" }, { status: 200 });
+    }
+  }
+
+  // ---- Full payload -------------------------------------------------------
+  const fx = await getFxRates({ force });
+  const [turkey, board] = await Promise.all([
+    getTurkeyDeals({ force }),
+    getConsoleBoard(fx, { force }),
+  ]);
   const wl = await readWatchlist();
+  const meta = liveMeta();
+  const liveStamps = [meta.lastLiveGamesAt, meta.lastLiveConsolesAt, meta.lastLiveFxAt]
+    .filter((v): v is string => v != null)
+    .sort();
 
   return NextResponse.json({
     games: turkey.games,
-    consoles: getConsoleDeals(),
+    consoles: board.rows,
+    consoleLiveShare:
+      board.rows.length > 0 ? board.liveCount / board.rows.length : 0,
     fx,
     watchlist: wl.titles,
     watchlistOk: wl.ok,
     sources: {
       games: turkey.source,
-      fx: fx.source,
-      consoles: "curated",
+      consoles: board.liveCount > 0 ? "live" : "curated",
+      fx: fx.source === "live" ? "live" : "fallback",
     },
     gamesAsOf: turkey.asOf ?? null,
     consolesAsOf: CONSOLES_AS_OF,
     snapshotAsOf: TURKEY_SNAPSHOT_AS_OF,
+    lastLiveFetch: liveStamps.length > 0 ? liveStamps[liveStamps.length - 1] : null,
+    cacheMaxAgeSeconds: REVALIDATE_SECONDS,
     updatedAt: new Date().toISOString(),
   });
 }

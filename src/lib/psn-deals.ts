@@ -1,8 +1,11 @@
 /**
  * Server-side data layer for /psn-deals.
  *
- * Keyless live pipeline (designed for datacenter/Vercel egress — no GraphQL,
- * which Sony's edge blocks from serverless IPs):
+ * Keyless live pipeline (designed for datacenter/Vercel egress).
+ * The PRIMARY deals source is Sony's official Storefront GraphQL API
+ * (web.np.playstation.com — see src/lib/psn-graphql.ts); the HTML scrape and
+ * aggregator chain below remains as fallback when the GraphQL persisted query
+ * rotates or is blocked:
  *
  *   - FX: open.er-api.com (free, keyless, USD-based table) — one call yields
  *     live BDT rates for USD, GBP, EUR, JPY and TRY. 30-minute Next.js data
@@ -50,6 +53,11 @@ import {
   type FxRates,
   type PsnDealGame,
 } from "./psn-deals-data";
+
+import {
+  fetchTurkeyDealsGraphQL,
+  searchPsnGraphQL,
+} from "./psn-graphql";
 
 export const REVALIDATE_SECONDS = 1800; // 30 minutes
 
@@ -879,6 +887,18 @@ async function fetchTurkeyDealsAggregators(
 export async function getTurkeyDeals(
   opts: FetchOpts = {},
 ): Promise<TurkeyDealsResult> {
+  // 0) Official Storefront GraphQL (web.np.playstation.com) — structured JSON,
+  //    served from Sony's edge rather than the Akamai-blocked HTML path.
+  try {
+    const gql = await fetchTurkeyDealsGraphQL(opts);
+    if (gql) {
+      lastLive.gamesAt = Date.now();
+      lastLive.gamesProvider = gql.provider;
+      return { games: gql.games, source: "live", provider: gql.provider, asOf: null };
+    }
+  } catch (err) {
+    console.error("[psn-deals] GraphQL deals fetch failed, falling back to HTML chain:", err);
+  }
   // 1) PlayStation Store pages (en-tr deals hub + selected category grid)
   try {
     const psn = await fetchTurkeyDealsPsnPages(opts);
@@ -907,6 +927,25 @@ export async function getTurkeyDeals(
 }
 
 /**
+ * Parse a Sony storefront __NEXT_DATA__ Apollo payload (as copied from an open
+ * deals-hub tab) into the deals + campaign tabs it contains. Used by the
+ * "Sync from PSN Tab" manual import in the API route. Never throws on junk —
+ * returns empty arrays; the caller decides whether that's an error.
+ */
+export function parseApolloState(nextData: unknown): {
+  games: PsnDealGame[];
+  campaigns: DealCampaign[];
+} {
+  if (nextData == null || typeof nextData !== "object") {
+    return { games: [], campaigns: [] };
+  }
+  return {
+    games: walkerDeals(nextData, true, 60),
+    campaigns: extractCampaigns(nextData),
+  };
+}
+
+/**
  * Live catalog lookup for one title — used by the watchlist to price it in
  * TRY. Returns full-price AND discounted items, with the provider label.
  */
@@ -922,6 +961,16 @@ export async function searchPsnTrLive(
   const q = query.trim().slice(0, 80);
   const needle = normTitle(q);
   if (q.length < 2) return { results: [], provider: null };
+
+  // 0) Storefront GraphQL universal search (TR locale). Best-effort: when the
+  //    response embeds priced products they are extracted; otherwise (ids-only
+  //    hits) this returns null and the HTML relay chain below runs unchanged.
+  try {
+    const gql = await searchPsnGraphQL(q, { force: opts.force });
+    if (gql) return gql;
+  } catch (err) {
+    console.warn("[psn-deals] GraphQL search failed, falling back to HTML chain:", err);
+  }
 
   // 1) PlayStation Store search page (direct → relays)
   try {

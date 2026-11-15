@@ -2,6 +2,7 @@ import {
   boolean,
   index,
   integer,
+  jsonb,
   pgTable,
   serial,
   text,
@@ -60,3 +61,17 @@ export const psnWatchlist = pgTable("psn_watchlist", {
 });
 
 export type PsnWatchlistEntry = typeof psnWatchlist.$inferSelect;
+
+// ---- PSN deals persistent cache -------------------------------------------
+// Written on every successful live fetch (GraphQL or manual "Sync from PSN
+// Tab" import) so all devices are served the last-known-good deals instantly.
+export const psnDealsCache = pgTable("psn_deals_cache", {
+  cacheKey: text("cache_key").primaryKey(),
+  payload: jsonb("payload").notNull(),
+  provider: text("provider"),
+  fetchedAt: timestamp("fetched_at", { mode: "string", withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export type PsnDealsCacheRow = typeof psnDealsCache.$inferSelect;

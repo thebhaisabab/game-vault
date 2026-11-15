@@ -4,6 +4,7 @@ Your personal game library — searchable against **every game in the world**, s
 
 - Search the global game catalogue (PlayStation, Xbox, Nintendo, PC, retro) and add titles in one click — **cover art is pulled from the internet automatically**
 - Track what you're **Playing / Completed / Backlog / Wishlist / Paused / Dropped**, plus the platform you played on (**PS5, PS4, PS3, Xbox Series X|S, Xbox One, Switch, PC…**), your own 1–10 rating, hours played, notes, and favorites
+- **`/psn-deals` — PS5 Deals & Console Price Tracker**: discounted games on the PlayStation Store Turkey (₺, best-effort live fetch with a labelled offline snapshot fallback), a PostgreSQL-synced custom watchlist that flags your tracked games when they go on sale, a live ₺TRY ↔ ৳BDT converter (open.er-api.com), and a curated worldwide PS5 console price board for USA, UK, Europe, Japan and Turkey
 - Switch between **Tile**, **List**, and **Showcase** views (keys `1` `2` `3`)
 - **Synced across devices** — everything lives in PostgreSQL, so open it on your phone, laptop and TV and it's always the same vault
 - Filter by status, platform, free text; sort by add date, title, release year, your rating or critics' score
@@ -17,7 +18,7 @@ Next.js (App Router) · React 19 · Tailwind CSS v4 · framer-motion · Drizzle 
 ```bash
 npm install
 cp .env.example .env        # fill in values below
-npx drizzle-kit push        # create the tables
+npx drizzle-kit push        # create the tables (library + psn_watchlist)
 npm run dev
 ```
 

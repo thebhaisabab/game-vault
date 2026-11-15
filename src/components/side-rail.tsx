@@ -1,6 +1,6 @@
 "use client";
 
-import { Gamepad2, Heart, Library, Plus } from "lucide-react";
+import { Gamepad2, Heart, Library, Plus, Tag } from "lucide-react";
 
 function GithubIcon({ size = 17 }: { size?: number }) {
   return (
@@ -77,6 +77,19 @@ export default function SideRail({
           );
         })}
       </nav>
+
+      {/* PS5 deals link */}
+      <a
+        href="/psn-deals"
+        aria-label="PS5 deals and console price tracker"
+        title="PS5 deals & console prices"
+        className="group relative mt-3 grid h-11 w-11 place-items-center rounded-xl border border-volt/40 bg-volt/[0.06] text-volt transition-all duration-200 hover:bg-volt hover:text-void"
+      >
+        <Tag size={18} strokeWidth={2} />
+        <span className="pointer-events-none absolute left-full ml-3 hidden rounded-md border border-white/10 bg-panel-2 px-2 py-1 font-mono text-[10px] whitespace-nowrap text-white/80 group-hover:block">
+          PS5 deals · console prices
+        </span>
+      </a>
 
       {/* footer */}
       <div className="flex flex-col items-center gap-4">

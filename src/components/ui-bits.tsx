@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { Heart } from "lucide-react";
 import { platformTone, STATUS_META, titleGradient } from "@/lib/constants";
+import { useCoverChain } from "./use-cover-chain";
 import type { LibraryGame } from "@/db/schema";
 import type { GameStatus } from "@/lib/types";
 
@@ -18,16 +18,15 @@ export function CoverArt({
   priority?: boolean;
 }) {
   void sizes;
-  const [broken, setBroken] = useState(false);
-  const url = game.coverUrl;
-  return url && !broken ? (
+  const { currentSrc, exhausted, onError } = useCoverChain(game.coverUrl);
+  return currentSrc && !exhausted ? (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={url}
+      src={currentSrc}
       alt={`Cover art for ${game.title}`}
       loading={priority ? "eager" : "lazy"}
       referrerPolicy="no-referrer"
-      onError={() => setBroken(true)}
+      onError={onError}
       className={`h-full w-full object-cover ${className}`}
     />
   ) : (

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Check, Database, Loader2, PenLine, Plus, Search, X } from "lucide-react";
 import { PLATFORM_SUGGESTIONS, titleGradient } from "@/lib/constants";
+import { useCoverChain } from "./use-cover-chain";
 import type { GameSearchResult } from "@/lib/types";
 
 export type AddOutcome = "added" | "exists" | "error";
@@ -316,8 +317,8 @@ export default function SearchModal({
 }
 
 function ResultCover({ title, url }: { title: string; url: string | null }) {
-  const [broken, setBroken] = useState(false);
-  if (!url || broken) {
+  const { currentSrc, exhausted, onError } = useCoverChain(url);
+  if (!currentSrc || exhausted) {
     return (
       <div
         className="flex h-full w-full items-center justify-center p-3"
@@ -332,11 +333,11 @@ function ResultCover({ title, url }: { title: string; url: string | null }) {
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={url}
+      src={currentSrc}
       alt={`Cover art for ${title}`}
       loading="lazy"
       referrerPolicy="no-referrer"
-      onError={() => setBroken(true)}
+      onError={onError}
       className="h-full w-full object-cover"
     />
   );

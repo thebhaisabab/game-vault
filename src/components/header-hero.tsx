@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { motion, useSpring, useTransform } from "framer-motion";
+import { HeartHandshake } from "lucide-react";
 import type { LibraryGame } from "@/db/schema";
 import { CoverArt } from "./ui-bits";
 
@@ -49,14 +51,23 @@ export default function HeaderHero({ games }: { games: LibraryGame[] }) {
   return (
     <header className="relative overflow-hidden border-b border-line">
       <div className="px-5 pt-10 pb-6 sm:px-8 lg:px-12">
-        {/* eyebrow */}
-        <motion.p
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="font-mono text-[10px] font-medium tracking-[0.3em] text-volt uppercase"
-        >
-          {total === 1 ? "001 title catalogued" : String(total).padStart(3, "0") + " titles catalogued"} · synced across devices
-        </motion.p>
+        {/* eyebrow + co-op link */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <motion.p
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="font-mono text-[10px] font-medium tracking-[0.3em] text-volt uppercase"
+          >
+            {total === 1 ? "001 title catalogued" : String(total).padStart(3, "0") + " titles catalogued"} · synced across devices
+          </motion.p>
+          <Link
+            href="/co-op"
+            className="inline-flex items-center gap-1.5 rounded-full border border-pink/30 bg-pink/10 px-3 py-1.5 font-mono text-[9px] font-bold tracking-[0.22em] text-pink uppercase transition-all hover:border-pink/60 hover:bg-pink/20 hover:shadow-[0_0_18px_rgba(255,77,141,0.35)] sm:text-[10px]"
+          >
+            <HeartHandshake size={12} strokeWidth={2.2} />
+            Co-Op Vault · P1 &amp; P2
+          </Link>
+        </div>
 
         <div className="mt-4 flex flex-wrap items-end justify-between gap-x-10 gap-y-8">
           <motion.h1

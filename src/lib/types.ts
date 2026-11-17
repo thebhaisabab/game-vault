@@ -28,3 +28,15 @@ export interface SearchResponse {
   results: GameSearchResult[];
   provider: GameProviderId | null;
 }
+
+// ---------------------------------------------------- Co-Op Vault ----------
+export type CoOpStatus = "wishlist" | "bought";
+
+/** Optional co-op mode tags shown on co-op vault cards. */
+export const COOP_TAGS = [
+  "Couch Co-Op",
+  "Split-Screen",
+  "Online Co-Op",
+  "Pass the Controller",
+] as const;
+export type CoOpTag = (typeof COOP_TAGS)[number];

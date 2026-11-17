@@ -8,8 +8,8 @@ import {
   timestamp,
 } from "drizzle-orm/pg-core";
 
-export type { GameStatus, CoOpStatus } from "@/lib/types";
-import type { GameStatus, CoOpStatus } from "@/lib/types";
+export type { GameStatus } from "@/lib/types";
+import type { GameStatus } from "@/lib/types";
 
 export const libraryGames = pgTable(
   "library_games",
@@ -51,9 +51,12 @@ export type LibraryGame = typeof libraryGames.$inferSelect;
 export type NewLibraryGame = typeof libraryGames.$inferInsert;
 
 // ---- Co-Op Vault (games to play together — Player 1 & Player 2) ----------
-// Section split via `status`: "wishlist" = dreamed about, "bought" = ready
-// on the shelf. `coopTag` is a free-ish mode tag (see COOP_TAGS), `note` is
-// the personal bit ("For weekend date night").
+// Two orthogonal axes, exactly like the main vault plus an ownership bucket:
+//   `isBought` — true = "Already Bought" (couch-ready) / false = "Co-Op Wishlist"
+//   `status`   — play state (playing/completed/backlog/wishlist/paused/dropped)
+// `coopTag` is the mode tag (see COOP_TAGS); `notes` is the personal bit
+// ("For weekend date night"). `note` is a legacy column from v1 of the table,
+// kept so old databases keep working — new code reads/writes `notes`.
 export const coOpGames = pgTable("co_op_games", {
   id: serial("id").primaryKey(),
   externalId: text("external_id"),
@@ -63,7 +66,13 @@ export const coOpGames = pgTable("co_op_games", {
   heroUrl: text("hero_url"),
   releaseYear: integer("release_year"),
   platforms: text("platforms").array().default([]),
-  status: text("status").$type<CoOpStatus>().notNull().default("wishlist"),
+  isBought: boolean("is_bought").notNull().default(false),
+  status: text("status").$type<GameStatus>().notNull().default("backlog"),
+  platform: text("platform"),
+  rating: integer("rating"),
+  hoursPlayed: integer("hours_played"),
+  isLoved: boolean("is_loved").notNull().default(false),
+  notes: text("notes"),
   coopTag: text("coop_tag"),
   note: text("note"),
   createdAt: timestamp("created_at", { mode: "string" }).notNull().defaultNow(),

@@ -30,8 +30,6 @@ export interface SearchResponse {
 }
 
 // ---------------------------------------------------- Co-Op Vault ----------
-export type CoOpStatus = "wishlist" | "bought";
-
 /** Optional co-op mode tags shown on co-op vault cards. */
 export const COOP_TAGS = [
   "Couch Co-Op",

@@ -1,20 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { AnimatePresence, motion, LayoutGroup } from "framer-motion";
+import { AnimatePresence, LayoutGroup } from "framer-motion";
 import {
   ArrowLeft,
-  Check,
   Gamepad2,
+  Grid3x3,
   Heart,
-  Loader2,
+  LayoutGrid,
+  List,
   Lock,
   Plus,
   ShoppingBag,
   Sparkles,
-  Trash2,
-  Undo2,
   Users,
   WifiOff,
 } from "lucide-react";
@@ -22,9 +21,44 @@ import {
 import type { CoOpGame } from "@/db/schema";
 import Toasts, { type Toast } from "./toasts";
 import CoOpAddModal, { type CoOpAddPayload } from "./co-op-add-modal";
-import { CoverArt } from "./ui-bits";
+import CoOpDetailDrawer, { type CoOpPatch } from "./co-op-detail-drawer";
+import { CoOpCompactView, CoOpListView, CoOpTileView, type CoOpView } from "./co-op-views";
 
 type Section = "bought" | "wishlist";
+
+/* ---------------- view preference (localStorage, default: tile) --------- */
+const COOP_VIEW_KEY = "gv-coop-view";
+const viewListeners = new Set<() => void>();
+const viewStore = {
+  get(): CoOpView {
+    try {
+      const v = window.localStorage.getItem(COOP_VIEW_KEY);
+      return v === "list" || v === "compact" ? v : "tile";
+    } catch {
+      return "tile";
+    }
+  },
+  set(v: CoOpView) {
+    try {
+      window.localStorage.setItem(COOP_VIEW_KEY, v);
+    } catch {
+      /* private mode */
+    }
+    viewListeners.forEach((l) => l());
+  },
+  subscribe(cb: () => void) {
+    viewListeners.add(cb);
+    return () => {
+      viewListeners.delete(cb);
+    };
+  },
+};
+
+const VIEW_OPTIONS: { id: CoOpView; label: string; icon: typeof LayoutGrid }[] = [
+  { id: "tile", label: "Tile view", icon: LayoutGrid },
+  { id: "list", label: "List view", icon: List },
+  { id: "compact", label: "Compact grid", icon: Grid3x3 },
+];
 
 export default function CoOpVault({
   initialGames,
@@ -36,8 +70,10 @@ export default function CoOpVault({
   const [games, setGames] = useState<CoOpGame[]>(initialGames);
   const [dbOk, setDbOk] = useState(initialDbOk);
   const [modalOpen, setModalOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [busyIds, setBusyIds] = useState<Record<number, boolean>>({});
+  const view = useSyncExternalStore(viewStore.subscribe, viewStore.get, () => "tile");
 
   // ---------- admin verification (mirrors the main vault pattern) ----------
   // Persist the ?admin=<secret> grant once, then derive admin state with
@@ -71,6 +107,11 @@ export default function CoOpVault({
     () => false,
   );
 
+  const gamesRef = useRef(games);
+  useEffect(() => {
+    gamesRef.current = games;
+  }, [games]);
+
   const adminQuery = useMemo(() => {
     const secret = process.env.NEXT_PUBLIC_ADMIN_SECRET;
     return secret ? `?admin=${encodeURIComponent(secret)}` : "";
@@ -90,16 +131,21 @@ export default function CoOpVault({
   const bought = useMemo(
     () =>
       games
-        .filter((g) => g.status === "bought")
+        .filter((g) => g.isBought)
         .sort((a, b) => a.title.localeCompare(b.title)),
     [games],
   );
   const wishlist = useMemo(
     () =>
       games
-        .filter((g) => g.status === "wishlist")
+        .filter((g) => !g.isBought)
         .sort((a, b) => a.title.localeCompare(b.title)),
     [games],
+  );
+
+  const selectedGame = useMemo(
+    () => (selectedId !== null ? (games.find((g) => g.id === selectedId) ?? null) : null),
+    [games, selectedId],
   );
 
   const inCollection = useCallback(
@@ -134,10 +180,9 @@ export default function CoOpVault({
         setDbOk(true);
         pushToast({
           kind: "ok",
-          title:
-            data.game.status === "bought"
-              ? "On the shelf — one for the two of you 🎮"
-              : "Pinned to the co-op wishlist 💗",
+          title: data.game.isBought
+            ? "On the shelf — one for the two of you 🎮"
+            : "Pinned to the co-op wishlist 💗",
           detail: data.game.title,
         });
         return "added";
@@ -153,82 +198,123 @@ export default function CoOpVault({
     [adminQuery, pushToast],
   );
 
-  const moveStatus = useCallback(
-    async (game: CoOpGame, next: Section) => {
-      if (!isAdmin || busyIds[game.id]) return;
-      // optimistic move between the couch and the wishlist
-      const previous = games;
-      setGames((gs) =>
-        gs.map((g) => (g.id === game.id ? { ...g, status: next } : g)),
-      );
-      setBusy(game.id, true);
+  /** Drawer/quick-action patch — optimistic with rollback. Returns success. */
+  const updateGame = useCallback(
+    async (id: number, patch: CoOpPatch): Promise<boolean> => {
+      if (!isAdmin) return false;
+      const snapshot = gamesRef.current;
+      setGames((gs) => gs.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+      setBusy(id, true);
       try {
         const res = await fetch(`/api/co-op${adminQuery}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: game.id, status: next }),
+          body: JSON.stringify({ id, ...patch }),
         });
         if (!res.ok) throw new Error();
         const data = (await res.json()) as { game: CoOpGame };
-        setGames((gs) => gs.map((g) => (g.id === game.id ? data.game : g)));
-        if (next === "bought") {
-          pushToast({
-            kind: "ok",
-            title: "It's ours now 🎉",
-            detail: `${game.title} moved from wishlist to the shelf.`,
-          });
-        } else {
-          pushToast({
-            kind: "info",
-            title: "Back to the wishlist",
-            detail: game.title,
-          });
+        setGames((gs) => gs.map((g) => (g.id === id ? data.game : g)));
+        if (typeof patch.isBought === "boolean") {
+          pushToast(
+            patch.isBought
+              ? { kind: "ok", title: "It's ours now 🎉", detail: data.game.title }
+              : { kind: "info", title: "Back to the wishlist", detail: data.game.title },
+          );
         }
+        return true;
       } catch {
-        setGames(previous); // roll back
+        setGames(snapshot);
         pushToast({
           kind: "err",
-          title: "Move failed",
-          detail: "Database unreachable — the card was restored.",
+          title: "Sync failed",
+          detail: "Database unreachable — the change was reverted.",
         });
+        return false;
       } finally {
-        setBusy(game.id, false);
+        setBusy(id, false);
       }
     },
-    [adminQuery, busyIds, games, isAdmin, pushToast],
+    [adminQuery, isAdmin, pushToast],
+  );
+
+  const moveBucket = useCallback(
+    (game: CoOpGame, nextBought: boolean) => {
+      void updateGame(game.id, { isBought: nextBought });
+    },
+    [updateGame],
+  );
+
+  const toggleLoved = useCallback(
+    (game: CoOpGame) => {
+      void updateGame(game.id, { isLoved: !game.isLoved });
+    },
+    [updateGame],
+  );
+
+  const openGame = useCallback(
+    (game: CoOpGame) => {
+      if (!isAdmin) {
+        pushToast({
+          kind: "info",
+          title: "Player 1 only",
+          detail: "You're here for the romance — edits are Player 1's job.",
+        });
+        return;
+      }
+      setSelectedId(game.id);
+    },
+    [isAdmin, pushToast],
   );
 
   const removeGame = useCallback(
-    async (game: CoOpGame) => {
+    async (id: number) => {
       if (!isAdmin) return;
-      const confirmed = window.confirm(
-        `Remove “${game.title}” from the co-op vault? This can't be undone.`,
-      );
-      if (!confirmed) return;
-      const previous = games;
-      setGames((gs) => gs.filter((g) => g.id !== game.id));
+      const game = gamesRef.current.find((g) => g.id === id);
+      const snapshot = gamesRef.current;
+      setGames((gs) => gs.filter((g) => g.id !== id));
+      setSelectedId(null);
       try {
         const sep = adminQuery ? "&" : "?";
-        const res = await fetch(`/api/co-op${adminQuery}${sep}id=${game.id}`, {
+        const res = await fetch(`/api/co-op${adminQuery}${sep}id=${id}`, {
           method: "DELETE",
         });
         if (!res.ok) throw new Error();
         pushToast({
           kind: "info",
           title: "Removed from the co-op vault",
-          detail: game.title,
+          detail: game?.title,
         });
       } catch {
-        setGames(previous);
+        setGames(snapshot);
         pushToast({
           kind: "err",
           title: "Could not remove it",
-          detail: "Database unreachable — the card was restored.",
+          detail: "Database unreachable — the game was restored.",
         });
       }
     },
-    [adminQuery, games, isAdmin, pushToast],
+    [adminQuery, isAdmin, pushToast],
   );
+
+  const renderView = (list: CoOpGame[]) => {
+    const shared = {
+      games: list,
+      isAdmin,
+      busyIds,
+      onOpen: openGame,
+      onMoveBucket: moveBucket,
+      onToggleLoved: toggleLoved,
+    };
+    switch (view) {
+      case "list":
+        return <CoOpListView {...shared} />;
+      case "compact":
+        return <CoOpCompactView {...shared} />;
+      case "tile":
+      default:
+        return <CoOpTileView {...shared} />;
+    }
+  };
 
   return (
     <div className="relative min-h-screen overflow-x-clip">
@@ -371,6 +457,39 @@ export default function CoOpVault({
           </div>
         </section>
 
+        {/* ================= view switcher bar ================= */}
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/8 bg-panel/60 px-3 py-2 backdrop-blur">
+          <div className="flex items-center gap-1.5" role="group" aria-label="Layout view">
+            <span className="hidden pl-1 pr-1.5 font-mono text-[9px] tracking-[0.28em] text-white/40 uppercase sm:block">
+              View
+            </span>
+            {VIEW_OPTIONS.map((opt) => {
+              const Icon = opt.icon;
+              const active = view === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => viewStore.set(opt.id)}
+                  aria-pressed={active}
+                  title={opt.label}
+                  aria-label={opt.label}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 font-mono text-[9px] font-bold tracking-[0.14em] uppercase transition-all ${
+                    active
+                      ? "border border-pink/50 bg-pink/15 text-pink shadow-[0_0_16px_rgba(255,77,141,0.3)]"
+                      : "border border-transparent text-white/45 hover:text-white"
+                  }`}
+                >
+                  <Icon size={14} strokeWidth={2.2} />
+                  <span className="hidden sm:inline">{opt.id}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="hidden font-mono text-[8px] tracking-[0.22em] text-white/35 uppercase md:block">
+            {isAdmin ? "Click any game to edit it · edits sync instantly" : "Player 1 edits · you're just here for the romance"}
+          </p>
+        </div>
+
         {/* ================= sections ================= */}
         <LayoutGroup>
           <CoOpSection
@@ -380,12 +499,9 @@ export default function CoOpVault({
             icon={<ShoppingBag size={15} className="text-volt" />}
             accent="#c8ff3e"
             games={bought}
-            isAdmin={isAdmin}
-            busyIds={busyIds}
-            onMove={moveStatus}
-            onDelete={removeGame}
             onAdd={() => setModalOpen(true)}
             emptyCta={isAdmin}
+            renderView={renderView}
           />
           <CoOpSection
             kind="wishlist"
@@ -394,12 +510,9 @@ export default function CoOpVault({
             icon={<Heart size={15} className="text-pink" fill="currentColor" />}
             accent="#ff4d8d"
             games={wishlist}
-            isAdmin={isAdmin}
-            busyIds={busyIds}
-            onMove={moveStatus}
-            onDelete={removeGame}
             onAdd={() => setModalOpen(true)}
             emptyCta={isAdmin}
+            renderView={renderView}
           />
         </LayoutGroup>
 
@@ -430,6 +543,18 @@ export default function CoOpVault({
         )}
       </AnimatePresence>
 
+      {/* ---------- detail / edit drawer ---------- */}
+      <AnimatePresence>
+        {selectedGame && (
+          <CoOpDetailDrawer
+            game={selectedGame}
+            onClose={() => setSelectedId(null)}
+            onUpdate={updateGame}
+            onDelete={removeGame}
+          />
+        )}
+      </AnimatePresence>
+
       <Toasts toasts={toasts} />
     </div>
   );
@@ -445,12 +570,9 @@ function CoOpSection({
   icon,
   accent,
   games,
-  isAdmin,
-  busyIds,
-  onMove,
-  onDelete,
-  onAdd,
   emptyCta,
+  onAdd,
+  renderView,
 }: {
   kind: Section;
   title: string;
@@ -458,12 +580,9 @@ function CoOpSection({
   icon: React.ReactNode;
   accent: string;
   games: CoOpGame[];
-  isAdmin: boolean;
-  busyIds: Record<number, boolean>;
-  onMove: (game: CoOpGame, next: Section) => void;
-  onDelete: (game: CoOpGame) => void;
-  onAdd: () => void;
   emptyCta: boolean;
+  onAdd: () => void;
+  renderView: (games: CoOpGame[]) => React.ReactNode;
 }) {
   return (
     <section className="mt-8" aria-labelledby={`co-op-${kind}-heading`}>
@@ -521,134 +640,8 @@ function CoOpSection({
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-3">
-          <AnimatePresence mode="popLayout">
-            {games.map((game) => (
-              <CoOpCard
-                key={game.id}
-                game={game}
-                isAdmin={isAdmin}
-                busy={Boolean(busyIds[game.id])}
-                onMove={onMove}
-                onDelete={onDelete}
-              />
-            ))}
-          </AnimatePresence>
-        </div>
+        renderView(games)
       )}
     </section>
-  );
-}
-
-/* ================================================================== */
-/* Card                                                                */
-/* ================================================================== */
-function CoOpCard({
-  game,
-  isAdmin,
-  busy,
-  onMove,
-  onDelete,
-}: {
-  game: CoOpGame;
-  isAdmin: boolean;
-  busy: boolean;
-  onMove: (game: CoOpGame, next: Section) => void;
-  onDelete: (game: CoOpGame) => void;
-}) {
-  const isBought = game.status === "bought";
-  const next: Section = isBought ? "wishlist" : "bought";
-
-  return (
-    <motion.article
-      layout
-      layoutId={`coop-card-${game.id}`}
-      initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.96 }}
-      transition={{ type: "spring", stiffness: 320, damping: 30 }}
-      className={`group flex gap-3 rounded-2xl border p-3 backdrop-blur transition-colors ${
-        isBought
-          ? "border-volt/15 bg-gradient-to-br from-volt/[0.05] to-panel-2 hover:border-volt/30"
-          : "border-pink/15 bg-gradient-to-br from-pink/[0.07] to-panel-2 hover:border-pink/35"
-      }`}
-    >
-      {/* cover */}
-      <div className="relative h-36 w-24 shrink-0 overflow-hidden rounded-xl border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.5)] sm:h-40 sm:w-28">
-        <CoverArt game={{ title: game.title, coverUrl: game.coverUrl }} />
-        {isBought && (
-          <span className="absolute top-1.5 left-1.5 grid h-6 w-6 place-items-center rounded-full bg-volt text-void shadow-[0_0_12px_rgba(200,255,62,0.5)]" title="Bought together">
-            <Check size={13} strokeWidth={3.2} />
-          </span>
-        )}
-      </div>
-
-      {/* meta */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <h3 className="line-clamp-2 text-sm leading-snug font-bold text-ink">
-          {game.title}
-        </h3>
-        <p className="tabular mt-1 font-mono text-[9px] tracking-[0.14em] text-white/40 uppercase">
-          {game.releaseYear ?? "TBA"}
-          {game.platforms && game.platforms.length > 0 && (
-            <> · {game.platforms.slice(0, 3).join(" ")}</>
-          )}
-        </p>
-
-        {game.coopTag && (
-          <span className="mt-1.5 inline-flex w-fit items-center gap-1 rounded-full border border-violet/40 bg-violet/15 px-2 py-0.5 font-mono text-[8px] font-medium tracking-[0.16em] text-violet uppercase">
-            <Gamepad2 size={9} />
-            {game.coopTag}
-          </span>
-        )}
-
-        {game.note && (
-          <p className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-pink/75 italic">
-            “{game.note}”
-          </p>
-        )}
-
-        {/* actions */}
-        <div className="mt-auto flex items-center gap-2 pt-2">
-          {isAdmin ? (
-            <>
-              <button
-                onClick={() => onMove(game, next)}
-                disabled={busy}
-                className={`inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-2 font-mono text-[9px] font-bold tracking-[0.12em] uppercase transition-all disabled:opacity-50 ${
-                  isBought
-                    ? "border border-white/10 text-white/50 hover:border-white/25 hover:text-white"
-                    : "bg-pink text-void shadow-[0_0_18px_rgba(255,77,141,0.35)] hover:shadow-[0_0_26px_rgba(255,77,141,0.5)]"
-                }`}
-                title={isBought ? "Move back to the wishlist" : "Move to Bought — it's ours now"}
-              >
-                {busy ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : isBought ? (
-                  <Undo2 size={12} strokeWidth={2.5} />
-                ) : (
-                  <ShoppingBag size={12} strokeWidth={2.5} />
-                )}
-                <span className="truncate">{isBought ? "Back to wishlist" : "Move to Bought"}</span>
-              </button>
-              <button
-                onClick={() => onDelete(game)}
-                disabled={busy}
-                aria-label={`Remove ${game.title} from the co-op vault`}
-                title="Remove from co-op vault"
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-white/10 text-white/35 transition-all hover:border-rose/40 hover:bg-rose/10 hover:text-rose disabled:opacity-50"
-              >
-                <Trash2 size={13} />
-              </button>
-            </>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 font-mono text-[8px] tracking-[0.2em] text-white/30 uppercase">
-              <Lock size={10} />
-              {isBought ? "On our shelf" : "On our wishlist"}
-            </span>
-          )}
-        </div>
-      </div>
-    </motion.article>
   );
 }

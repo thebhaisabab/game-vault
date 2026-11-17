@@ -4,9 +4,13 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { coOpGames } from "@/db/schema";
 import {
+  cleanBool,
   cleanCoopTag,
+  cleanHours,
   cleanInt,
   cleanPlatforms,
+  cleanPlatformText,
+  cleanRating,
   cleanStatus,
   cleanString,
   ensureCoOpTable,
@@ -18,11 +22,13 @@ export const dynamic = "force-dynamic";
 /**
  * Co-Op Vault API — Player 1 & Player 2's shared shelf.
  *   GET    → open read (anyone can view the vault)
- *   POST   → admin only: add a game          ({ title, status, ... })
- *   PATCH  → admin only: partial update       ({ id, status?, note?, coopTag?, title?, ... })
- *   DELETE → admin only: remove               (?id=123 or { id })
- * The co_op_games table is created idempotently on first use — no manual
- * migration needed on Vercel.
+ *   POST   → admin only: add a game          ({ title, isBought?, status?, ... })
+ *   PATCH  → admin only: partial update      ({ id, isBought?, status?, platform?,
+ *                                               rating?, hoursPlayed?, isLoved?,
+ *                                               notes?, coopTag?, ... })
+ *   DELETE → admin only: remove              (?id=123 or { id })
+ * The co_op_games table (and every column) is created/upgraded idempotently on
+ * first use — no manual migration needed on Vercel.
  */
 export async function GET() {
   try {
@@ -58,6 +64,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
 
+  const isBought = cleanBool(body.isBought);
+
   const values = {
     externalId: cleanString(body.externalId, 80),
     source: cleanString(body.source, 20) ?? "manual",
@@ -66,9 +74,22 @@ export async function POST(req: Request) {
     heroUrl: cleanString(body.heroUrl, 600),
     releaseYear: cleanInt(body.releaseYear, 1950, 2100),
     platforms: cleanPlatforms(body.platforms),
-    status: cleanStatus(body.status),
+    isBought,
+    status:
+      body.status !== undefined
+        ? cleanStatus(body.status)
+        : isBought
+          ? "backlog"
+          : "wishlist",
+    platform: cleanPlatformText(body.platform),
+    rating: cleanRating(body.rating),
+    hoursPlayed: cleanHours(body.hoursPlayed),
+    isLoved: cleanBool(body.isLoved),
+    notes:
+      cleanString(body.notes, 4000) ??
+      // tolerate the release-1 field name
+      cleanString(body.note, 500),
     coopTag: cleanCoopTag(body.coopTag),
-    note: cleanString(body.note, 500),
   };
 
   try {
@@ -107,21 +128,34 @@ export async function PATCH(req: Request) {
   }
 
   const patch: Record<string, unknown> = {};
+  if ("isBought" in body) patch.isBought = cleanBool(body.isBought);
   if ("status" in body) patch.status = cleanStatus(body.status);
+  if ("platform" in body) {
+    patch.platform =
+      body.platform === null ? null : cleanPlatformText(body.platform);
+  }
+  if ("rating" in body) {
+    patch.rating = body.rating === null ? null : cleanRating(body.rating);
+  }
+  if ("hoursPlayed" in body) {
+    patch.hoursPlayed =
+      body.hoursPlayed === null ? null : cleanHours(body.hoursPlayed);
+  }
+  if ("isLoved" in body) patch.isLoved = cleanBool(body.isLoved);
+  if ("notes" in body) {
+    patch.notes = body.notes === null ? null : cleanString(body.notes, 4000);
+  }
+  if ("coopTag" in body) patch.coopTag = cleanCoopTag(body.coopTag);
   if ("title" in body) {
     const title = cleanString(body.title, 200);
     if (!title) return NextResponse.json({ error: "bad_title" }, { status: 400 });
     patch.title = title;
   }
-  if ("note" in body) patch.note = cleanString(body.note, 500);
-  if ("coopTag" in body) patch.coopTag = cleanCoopTag(body.coopTag);
-  if ("platform" in body || "platforms" in body) {
-    patch.platforms = cleanPlatforms(body.platforms);
-  }
+  if ("coverUrl" in body) patch.coverUrl = cleanString(body.coverUrl, 600);
   if ("releaseYear" in body) {
     patch.releaseYear = cleanInt(body.releaseYear, 1950, 2100);
   }
-  if ("coverUrl" in body) patch.coverUrl = cleanString(body.coverUrl, 600);
+  if ("platforms" in body) patch.platforms = cleanPlatforms(body.platforms);
 
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "nothing_to_patch" }, { status: 400 });

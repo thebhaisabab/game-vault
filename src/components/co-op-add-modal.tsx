@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { PLATFORM_SUGGESTIONS, titleGradient } from "@/lib/constants";
-import { COOP_TAGS, type CoOpStatus, type CoOpTag } from "@/lib/types";
+import { COOP_TAGS, type CoOpTag } from "@/lib/types";
 import type { GameSearchResult } from "@/lib/types";
 import { useCoverChain } from "./use-cover-chain";
 
@@ -27,9 +27,9 @@ export interface CoOpAddPayload {
   heroUrl?: string | null;
   releaseYear?: number | null;
   platforms?: string[];
-  status: CoOpStatus;
+  isBought: boolean;
   coopTag: CoOpTag | null;
-  note: string;
+  notes: string | null;
 }
 
 export default function CoOpAddModal({
@@ -50,7 +50,7 @@ export default function CoOpAddModal({
   const [addedIds, setAddedIds] = useState<Record<string, boolean>>({});
 
   // ---- the "date night preferences" every add inherits ----
-  const [status, setStatus] = useState<CoOpStatus>("wishlist");
+  const [bucket, setBucket] = useState<"wishlist" | "bought">("wishlist");
   const [coopTag, setCoopTag] = useState<CoOpTag | null>("Couch Co-Op");
   const [note, setNote] = useState("");
 
@@ -109,9 +109,9 @@ export default function CoOpAddModal({
   }, [q, runSearch]);
 
   const sharedOptions = {
-    status,
+    isBought: bucket === "bought",
     coopTag,
-    note: note.trim(),
+    notes: note.trim() ? note.trim() : null,
   };
 
   const handleAddResult = async (r: GameSearchResult) => {
@@ -223,11 +223,11 @@ export default function CoOpAddModal({
                   ] as const
                 ).map((opt) => {
                   const Icon = opt.icon;
-                  const active = status === opt.id;
+                  const active = bucket === opt.id;
                   return (
                     <button
                       key={opt.id}
-                      onClick={() => setStatus(opt.id)}
+                      onClick={() => setBucket(opt.id)}
                       aria-pressed={active}
                       className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 font-mono text-[10px] font-bold tracking-[0.12em] uppercase transition-all ${
                         active
@@ -376,7 +376,7 @@ export default function CoOpAddModal({
               {providerLabel ?? "Keyless search · no accounts, no keys"}
             </p>
             <p className="font-mono text-[9px] tracking-[0.16em] text-pink/60 uppercase">
-              {status === "bought" ? "→ Already Bought" : "→ Wishlist"}
+              {bucket === "bought" ? "→ Already Bought" : "→ Wishlist"}
               {coopTag ? ` · ${coopTag}` : ""}
             </p>
           </div>

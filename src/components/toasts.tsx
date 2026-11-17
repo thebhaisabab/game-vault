@@ -13,7 +13,7 @@ export interface Toast {
 
 export default function Toasts({ toasts }: { toasts: Toast[] }) {
   return (
-    <div className="pointer-events-none fixed bottom-5 left-1/2 z-[70] flex w-full max-w-sm -translate-x-1/2 flex-col items-center gap-2 px-4">
+    <div className="pointer-events-none fixed bottom-5 left-1/2 z-[70] flex w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 flex-col items-center gap-2">
       <AnimatePresence>
         {toasts.map((t) => (
           <motion.div
@@ -39,7 +39,7 @@ export default function Toasts({ toasts }: { toasts: Toast[] }) {
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-semibold text-ink">{t.title}</p>
               {t.detail && (
-                <p className="truncate font-mono text-[10px] text-white/45">{t.detail}</p>
+                <p className="font-mono text-[10px] leading-relaxed break-words whitespace-normal text-white/45">{t.detail}</p>
               )}
             </div>
             {t.action && (

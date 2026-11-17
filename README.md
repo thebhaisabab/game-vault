@@ -6,6 +6,7 @@ Your personal game library — searchable against **every game in the world**, s
 - Track what you're **Playing / Completed / Backlog / Wishlist / Paused / Dropped**, plus the platform you played on (**PS5, PS4, PS3, Xbox Series X|S, Xbox One, Switch, PC…**), your own 1–10 rating, hours played, notes, and favorites
 - Switch between **Tile**, **List**, and **Showcase** views (keys `1` `2` `3`)
 - **Synced across devices** — everything lives in PostgreSQL, so open it on your phone, laptop and TV and it's always the same vault
+- **Player Two / Co-Op Vault** — a dedicated page (`/co-op`) for the games you'll play together: 🛒 *Already Bought* (ready for couch co-op) vs 💗 the *Co-Op Wishlist*, one-tap **Move to Bought**, cover art + release year pulled automatically, co-op mode tags (couch / split-screen / online / pass-the-pad) and personal notes like “For weekend date night”. Linked from the sidebar and vault header
 - Filter by status, platform, free text; sort by add date, title, release year, your rating or critics' score
 
 ## Stack
@@ -53,6 +54,7 @@ Because the library syncs through a database, deploy to a host that runs the Nex
    ```bash
    DATABASE_URL="<your-production-db-url>" npx drizzle-kit push
    ```
+   > The **Co-Op Vault** table (`co_op_games`) creates itself automatically on first request — no manual migration needed. `drizzle-kit push` covers the library tables only.
 
 ## Keyboard shortcuts
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Gamepad2, Heart, Library, Plus } from "lucide-react";
+import { Gamepad2, Heart, HeartHandshake, Library, Plus } from "lucide-react";
 
 function GithubIcon({ size = 17 }: { size?: number }) {
   return (
@@ -76,6 +76,21 @@ export default function SideRail({
             </button>
           );
         })}
+
+        {/* link to the Co-Op Vault — Player 1 & Player 2 */}
+        <span className="my-1 h-px w-8 bg-white/10" aria-hidden="true" />
+        <a
+          href="/co-op"
+          aria-label="Co-Op Vault — games to play together"
+          title="Co-Op Vault · P1 & P2"
+          className="group relative grid h-11 w-11 place-items-center rounded-xl border border-pink/25 bg-pink/10 text-pink transition-all duration-200 hover:border-pink/50 hover:bg-pink/20 hover:shadow-[0_0_22px_rgba(255,77,141,0.4)]"
+        >
+          <HeartHandshake size={18} strokeWidth={2} />
+          <span className="absolute -left-[18px] h-6 w-[3px] rounded-full bg-pink/70" aria-hidden="true" />
+          <span className="pointer-events-none absolute left-full ml-3 hidden rounded-md border border-pink/30 bg-panel-2 px-2 py-1 font-mono text-[10px] whitespace-nowrap text-pink group-hover:block">
+            Co-Op Vault · P1 &amp; P2
+          </span>
+        </a>
       </nav>
 
       {/* footer */}
